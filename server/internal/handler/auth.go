@@ -2,11 +2,11 @@ package handler
 
 import (
 	"context"
-	"errors"
 	"crypto/rand"
 	"crypto/subtle"
 	"encoding/binary"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
@@ -93,12 +93,13 @@ func generateCode() (string, error) {
 }
 
 func (h *Handler) issueJWT(user db.User) (string, error) {
+	now := time.Now()
 	token := jwt.NewWithClaims(jwt.SigningMethodHS256, jwt.MapClaims{
 		"sub":   uuidToString(user.ID),
 		"email": user.Email,
 		"name":  user.Name,
-		"exp":   time.Now().Add(30 * 24 * time.Hour).Unix(),
-		"iat":   time.Now().Unix(),
+		"exp":   now.Add(auth.SessionDuration()).Unix(),
+		"iat":   now.Unix(),
 	})
 	return token.SignedString(auth.JWTSecret())
 }

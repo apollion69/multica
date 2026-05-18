@@ -10,23 +10,24 @@ import (
 	"net/http"
 	"net/url"
 	"os"
+	"regexp"
 	"strings"
 	"sync"
 	"time"
 )
 
 const (
-	AuthCookieName   = "multica_auth"
-	CSRFCookieName   = "multica_csrf"
-	authCookieMaxAge = 30 * 24 * 60 * 60 // 30 days in seconds
+	AuthCookieName = "multica_auth"
+	CSRFCookieName = "multica_csrf"
 )
 
-var ipCookieDomainWarnOnce sync.Once
+var invalidCookieDomainWarnOnce sync.Once
+var cookieDomainLabelRE = regexp.MustCompile(`^[A-Za-z0-9-]+$`)
 
-// cookieDomain returns the trimmed COOKIE_DOMAIN env value, or "" if it looks
-// like an IP address. RFC 6265 §4.1.2.3 forbids IP literals in the cookie
-// Domain attribute, so browsers silently drop Set-Cookie headers that carry
-// one. An IP value here is almost always a misconfiguration.
+// cookieDomain returns the trimmed COOKIE_DOMAIN env value, or "" if the value
+// is unsafe for the browser cookie Domain attribute. RFC 6265 §4.1.2.3 forbids
+// IP literals, and browsers can drop Set-Cookie headers that carry invalid
+// Domain attributes. Invalid values become host-only cookies instead.
 func cookieDomain() string {
 	raw := strings.TrimSpace(os.Getenv("COOKIE_DOMAIN"))
 	if raw == "" {
@@ -34,16 +35,36 @@ func cookieDomain() string {
 	}
 	// A leading dot ("." for subdomain matching) is legal syntax but doesn't
 	// change whether the remainder is an IP literal.
-	if ip := net.ParseIP(strings.TrimPrefix(raw, ".")); ip != nil {
-		ipCookieDomainWarnOnce.Do(func() {
-			slog.Warn(
-				"COOKIE_DOMAIN looks like an IP address; ignoring. RFC 6265 forbids IP literals in the cookie Domain attribute, so browsers would drop the Set-Cookie. Leave COOKIE_DOMAIN empty for single-host deployments, or use a real domain.",
-				"value", raw,
-			)
+	if ok, reason := validCookieDomain(raw); !ok {
+		invalidCookieDomainWarnOnce.Do(func() {
+			slog.Warn("COOKIE_DOMAIN is invalid for browser cookie Domain; ignoring so session cookies remain host-only", "reason", reason)
 		})
 		return ""
 	}
 	return raw
+}
+
+func validCookieDomain(raw string) (bool, string) {
+	trimmed := strings.TrimSpace(strings.TrimPrefix(raw, "."))
+	if trimmed == "" {
+		return false, "empty"
+	}
+	if strings.Contains(trimmed, "://") || strings.ContainsAny(trimmed, "/\\") {
+		return false, "not-a-domain"
+	}
+	if ip := net.ParseIP(strings.Trim(trimmed, "[]")); ip != nil {
+		return false, "ip-literal"
+	}
+	if strings.EqualFold(trimmed, "localhost") || !strings.Contains(trimmed, ".") {
+		return false, "single-label"
+	}
+	labels := strings.Split(trimmed, ".")
+	for _, label := range labels {
+		if label == "" || strings.HasPrefix(label, "-") || strings.HasSuffix(label, "-") || !cookieDomainLabelRE.MatchString(label) {
+			return false, "invalid-label"
+		}
+	}
+	return true, ""
 }
 
 // isSecureCookie reports whether session cookies should carry the Secure flag.
@@ -84,14 +105,16 @@ func generateCSRFToken(authToken string) (string, error) {
 func SetAuthCookies(w http.ResponseWriter, token string) error {
 	secure := isSecureCookie()
 	domain := cookieDomain()
+	sessionDuration := SessionDuration()
+	sessionMaxAge := SessionMaxAgeSeconds()
 
 	http.SetCookie(w, &http.Cookie{
 		Name:     AuthCookieName,
 		Value:    token,
 		Path:     "/",
 		Domain:   domain,
-		MaxAge:   authCookieMaxAge,
-		Expires:  time.Now().Add(30 * 24 * time.Hour),
+		MaxAge:   sessionMaxAge,
+		Expires:  time.Now().Add(sessionDuration),
 		HttpOnly: true,
 		Secure:   secure,
 		SameSite: http.SameSiteStrictMode,
@@ -107,8 +130,8 @@ func SetAuthCookies(w http.ResponseWriter, token string) error {
 		Value:    csrfToken,
 		Path:     "/",
 		Domain:   domain,
-		MaxAge:   authCookieMaxAge,
-		Expires:  time.Now().Add(30 * 24 * time.Hour),
+		MaxAge:   sessionMaxAge,
+		Expires:  time.Now().Add(sessionDuration),
 		HttpOnly: false,
 		Secure:   secure,
 		SameSite: http.SameSiteStrictMode,

@@ -115,7 +115,7 @@ type Client struct {
 // Hub manages WebSocket connections organized by workspace rooms.
 type Hub struct {
 	rooms      map[string]map[*Client]bool // workspaceID -> clients
-	broadcast  chan []byte                  // global broadcast (daemon events)
+	broadcast  chan []byte                 // global broadcast (daemon events)
 	register   chan *Client
 	unregister chan *Client
 	mu         sync.RWMutex
@@ -374,17 +374,16 @@ func HandleWebSocket(hub *Hub, mc MembershipChecker, pr PATResolver, resolveSlug
 
 	// Try cookie auth first (web clients).
 	var userID string
+	var cookieAuthErr string
 	if cookie, err := r.Cookie(auth.AuthCookieName); err == nil && cookie.Value != "" {
 		uid, errMsg := authenticateToken(cookie.Value, pr, r.Context())
 		if errMsg != "" {
-			http.Error(w, errMsg, http.StatusUnauthorized)
-			return
+			cookieAuthErr = errMsg
+		} else if !mc.IsMember(r.Context(), uid, workspaceID) {
+			cookieAuthErr = `{"error":"not a member of this workspace"}`
+		} else {
+			userID = uid
 		}
-		if !mc.IsMember(r.Context(), uid, workspaceID) {
-			http.Error(w, `{"error":"not a member of this workspace"}`, http.StatusForbidden)
-			return
-		}
-		userID = uid
 	}
 
 	// Upgrade the connection. Clients without cookies (desktop) will authenticate
@@ -392,6 +391,12 @@ func HandleWebSocket(hub *Hub, mc MembershipChecker, pr PATResolver, resolveSlug
 	conn, err := upgrader.Upgrade(w, r, nil)
 	if err != nil {
 		slog.Error("websocket upgrade failed", "error", err)
+		return
+	}
+
+	if cookieAuthErr != "" {
+		conn.WriteMessage(websocket.TextMessage, []byte(cookieAuthErr))
+		conn.Close()
 		return
 	}
 

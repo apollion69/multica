@@ -3,23 +3,33 @@ import { type Logger, noopLogger } from "../logger";
 
 type EventHandler = (payload: unknown, actorId?: string) => void;
 
+export interface WSClientOptions {
+  logger?: Logger;
+  cookieAuth?: boolean;
+  onInvalidSession?: () => void;
+}
+
 export class WSClient {
   private ws: WebSocket | null = null;
   private baseUrl: string;
   private token: string | null = null;
   private workspaceSlug: string | null = null;
   private cookieAuth = false;
+  private onInvalidSession?: () => void;
   private handlers = new Map<WSEventType, Set<EventHandler>>();
   private reconnectTimer: ReturnType<typeof setTimeout> | null = null;
+  private reconnectAttempts = 0;
+  private closedPermanently = false;
   private hasConnectedBefore = false;
   private onReconnectCallbacks = new Set<() => void>();
   private anyHandlers = new Set<(msg: WSMessage) => void>();
   private logger: Logger;
 
-  constructor(url: string, options?: { logger?: Logger; cookieAuth?: boolean }) {
+  constructor(url: string, options?: WSClientOptions) {
     this.baseUrl = url;
     this.logger = options?.logger ?? noopLogger;
     this.cookieAuth = options?.cookieAuth ?? false;
+    this.onInvalidSession = options?.onInvalidSession;
   }
 
   setAuth(token: string | null, workspaceSlug: string) {
@@ -28,6 +38,7 @@ export class WSClient {
   }
 
   connect() {
+    this.closedPermanently = false;
     const url = new URL(this.baseUrl);
     // Token is never sent as a URL query parameter — it would be logged by
     // proxies, CDNs, and browser history.  In cookie mode the HttpOnly cookie
@@ -55,6 +66,12 @@ export class WSClient {
         this.onAuthenticated();
         return;
       }
+      const error = (msg as any).error;
+      if (typeof error === "string" && isInvalidSessionError(error)) {
+        this.closePermanently();
+        this.onInvalidSession?.();
+        return;
+      }
       this.logger.debug("received", msg.type);
       const eventHandlers = this.handlers.get(msg.type);
       if (eventHandlers) {
@@ -68,8 +85,11 @@ export class WSClient {
     };
 
     this.ws.onclose = () => {
-      this.logger.warn("disconnected, reconnecting in 3s");
-      this.reconnectTimer = setTimeout(() => this.connect(), 3000);
+      if (this.closedPermanently) return;
+      const delay = reconnectDelayMs(this.reconnectAttempts);
+      this.reconnectAttempts += 1;
+      this.logger.warn(`disconnected, reconnecting in ${Math.round(delay / 1000)}s`);
+      this.reconnectTimer = setTimeout(() => this.connect(), delay);
     };
 
     this.ws.onerror = () => {
@@ -80,6 +100,7 @@ export class WSClient {
 
   private onAuthenticated() {
     this.logger.info("connected");
+    this.reconnectAttempts = 0;
     if (this.hasConnectedBefore) {
       for (const cb of this.onReconnectCallbacks) {
         try {
@@ -92,7 +113,22 @@ export class WSClient {
     this.hasConnectedBefore = true;
   }
 
+  private closePermanently() {
+    this.closedPermanently = true;
+    if (this.reconnectTimer) {
+      clearTimeout(this.reconnectTimer);
+      this.reconnectTimer = null;
+    }
+    if (this.ws) {
+      this.ws.onclose = null;
+      this.ws.onerror = null;
+      this.ws.close();
+      this.ws = null;
+    }
+  }
+
   disconnect() {
+    this.closedPermanently = true;
     if (this.reconnectTimer) {
       clearTimeout(this.reconnectTimer);
       this.reconnectTimer = null;
@@ -139,4 +175,17 @@ export class WSClient {
       this.ws.send(JSON.stringify(message));
     }
   }
+}
+
+function reconnectDelayMs(attempt: number): number {
+  return Math.min(30_000, 1_000 * 2 ** Math.min(attempt, 5));
+}
+
+function isInvalidSessionError(error: string): boolean {
+  const normalized = error.toLowerCase();
+  return (
+    normalized.includes("invalid token") ||
+    normalized.includes("invalid claims") ||
+    normalized.includes("expired")
+  );
 }
