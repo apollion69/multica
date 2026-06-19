@@ -153,3 +153,87 @@ describe("WSClient", () => {
     );
   });
 });
+
+// Reconnection/auth-error fixture (separate from the URL-construction fake
+// above): records every instance so the backoff schedule can be asserted.
+class ReconnectFakeWebSocket {
+  static instances: ReconnectFakeWebSocket[] = [];
+  static readonly OPEN = 1;
+
+  readonly url: string;
+  readyState = ReconnectFakeWebSocket.OPEN;
+  onopen: (() => void) | null = null;
+  onmessage: ((event: { data: string }) => void) | null = null;
+  onclose: (() => void) | null = null;
+  onerror: (() => void) | null = null;
+  sent: string[] = [];
+
+  constructor(url: string) {
+    this.url = url;
+    ReconnectFakeWebSocket.instances.push(this);
+  }
+
+  send(message: string) {
+    this.sent.push(message);
+  }
+
+  close() {
+    this.readyState = 3;
+  }
+}
+
+describe("WSClient reconnection and error handling", () => {
+  afterEach(() => {
+    vi.useRealTimers();
+    vi.unstubAllGlobals();
+    ReconnectFakeWebSocket.instances = [];
+  });
+
+  it("reconnects with bounded exponential backoff after transient disconnects", () => {
+    vi.useFakeTimers();
+    vi.stubGlobal("WebSocket", ReconnectFakeWebSocket);
+
+    const client = new WSClient("ws://api.example.test/ws", { cookieAuth: true });
+    client.setAuth(null, "team-a");
+    client.connect();
+
+    expect(ReconnectFakeWebSocket.instances).toHaveLength(1);
+    ReconnectFakeWebSocket.instances[0]!.onclose?.();
+    expect(ReconnectFakeWebSocket.instances).toHaveLength(1);
+
+    vi.advanceTimersByTime(999);
+    expect(ReconnectFakeWebSocket.instances).toHaveLength(1);
+    vi.advanceTimersByTime(1);
+    expect(ReconnectFakeWebSocket.instances).toHaveLength(2);
+
+    ReconnectFakeWebSocket.instances[1]!.onclose?.();
+    vi.advanceTimersByTime(1_999);
+    expect(ReconnectFakeWebSocket.instances).toHaveLength(2);
+    vi.advanceTimersByTime(1);
+    expect(ReconnectFakeWebSocket.instances).toHaveLength(3);
+
+    client.disconnect();
+  });
+
+  it("stops reconnecting and reports confirmed invalid token errors", () => {
+    vi.useFakeTimers();
+    vi.stubGlobal("WebSocket", ReconnectFakeWebSocket);
+    const onInvalidSession = vi.fn();
+
+    const client = new WSClient("ws://api.example.test/ws", {
+      onInvalidSession,
+    });
+    client.setAuth("token", "team-a");
+    client.connect();
+
+    const ws = ReconnectFakeWebSocket.instances[0]!;
+    ws.onopen?.();
+    expect(ws.sent[0]).toContain('"auth"');
+
+    ws.onmessage?.({ data: JSON.stringify({ error: "invalid token" }) });
+    expect(onInvalidSession).toHaveBeenCalledTimes(1);
+
+    vi.advanceTimersByTime(30_000);
+    expect(ReconnectFakeWebSocket.instances).toHaveLength(1);
+  });
+});
