@@ -1,0 +1,47 @@
+From 0f3276e96704d469053df01bcf957e4338d20e0b Mon Sep 17 00:00:00 2001
+From: ops <ops@ve-lab.com>
+Date: Wed, 3 Jun 2026 17:35:31 +0300
+Subject: [PATCH 3/6] local: guard squad/non-member subscriber+inbox inserts
+ (D-544)
+
+---
+ server/cmd/server/notification_listeners.go | 5 +++++
+ server/cmd/server/subscriber_listeners.go   | 6 ++++++
+ 2 files changed, 11 insertions(+)
+
+diff --git a/server/cmd/server/notification_listeners.go b/server/cmd/server/notification_listeners.go
+index 5761ee7a1..a89e05ced 100644
+--- a/server/cmd/server/notification_listeners.go
++++ b/server/cmd/server/notification_listeners.go
+@@ -381,6 +381,11 @@ func notifyDirect(
+ 	body string,
+ 	details []byte,
+ ) {
++	// inbox_item.recipient_type is constrained to member/agent. Squad/other recipient
++	// kinds have no inbox -- skip to avoid a check-constraint violation (D-544).
++	if recipientType != "member" && recipientType != "agent" {
++		return
++	}
+ 	// Skip if recipient is the actor
+ 	if recipientID == e.ActorID {
+ 		return
+diff --git a/server/cmd/server/subscriber_listeners.go b/server/cmd/server/subscriber_listeners.go
+index 3fe392d23..0662f391c 100644
+--- a/server/cmd/server/subscriber_listeners.go
++++ b/server/cmd/server/subscriber_listeners.go
+@@ -147,6 +147,12 @@ func extractIssueFields(v any) (handler.IssueResponse, bool) {
+ // addSubscriber adds a user as an issue subscriber and publishes a
+ // subscriber:added event for real-time frontend sync.
+ func addSubscriber(bus *events.Bus, queries *db.Queries, workspaceID, issueID, userType, userID, reason string) {
++	// issue_subscriber.user_type is constrained to member/agent. Squad and other
++	// assignee kinds are dispatched via their own path, not individual subscriber
++	// rows -- skip them here to avoid a check-constraint violation and noisy log (D-544).
++	if userType != "member" && userType != "agent" {
++		return
++	}
+ 	err := queries.AddIssueSubscriber(context.Background(), db.AddIssueSubscriberParams{
+ 		IssueID:  parseUUID(issueID),
+ 		UserType: userType,
+-- 
+2.34.1
+

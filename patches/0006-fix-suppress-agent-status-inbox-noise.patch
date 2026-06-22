@@ -1,0 +1,76 @@
+From 114e92637173d0aebf1c76990a004b49b07af20c Mon Sep 17 00:00:00 2001
+From: "e.romanov" <e.romanov@ve-lab.com>
+Date: Mon, 15 Jun 2026 17:05:46 +0300
+Subject: [PATCH 6/6] fix: suppress agent status inbox noise
+
+---
+ server/cmd/server/notification_listeners.go | 31 +++++++++++----------
+ 1 file changed, 17 insertions(+), 14 deletions(-)
+
+diff --git a/server/cmd/server/notification_listeners.go b/server/cmd/server/notification_listeners.go
+index a89e05ced..8f7d98d4f 100644
+--- a/server/cmd/server/notification_listeners.go
++++ b/server/cmd/server/notification_listeners.go
+@@ -19,7 +19,6 @@ type mention struct {
+ 	ID   string // user_id, agent_id, issue_id, or "all"
+ }
+ 
+-
+ // statusLabels maps DB status values to human-readable labels for notifications.
+ var statusLabels = map[string]string{
+ 	"backlog":     "Backlog",
+@@ -67,6 +66,10 @@ func parseMentions(content string) []mention {
+ 	return result
+ }
+ 
++func shouldNotifyStatusChangeSubscribers(e events.Event) bool {
++	return e.ActorType == "member"
++}
++
+ // parentBubbleNotifTypes is the allowlist of inbox notification types that
+ // bubble up from a sub-issue to subscribers of its parent. Other event types
+ // only notify subscribers of the sub-issue itself, to keep parent watchers'
+@@ -78,19 +81,19 @@ var parentBubbleNotifTypes = map[string]bool{
+ // notifTypeToGroup maps each InboxItemType to a user-configurable preference
+ // group. Types not in this map are always delivered (not configurable).
+ var notifTypeToGroup = map[string]string{
+-	"issue_assigned":  "assignments",
+-	"unassigned":      "assignments",
+-	"assignee_changed": "assignments",
+-	"status_changed":  "status_changes",
+-	"new_comment":     "comments",
+-	"mentioned":       "comments",
+-	"priority_changed": "updates",
++	"issue_assigned":     "assignments",
++	"unassigned":         "assignments",
++	"assignee_changed":   "assignments",
++	"status_changed":     "status_changes",
++	"new_comment":        "comments",
++	"mentioned":          "comments",
++	"priority_changed":   "updates",
+ 	"start_date_changed": "updates",
+-	"due_date_changed": "updates",
+-	"task_completed":  "agent_activity",
+-	"task_failed":     "agent_activity",
+-	"agent_blocked":   "agent_activity",
+-	"agent_completed": "agent_activity",
++	"due_date_changed":   "updates",
++	"task_completed":     "agent_activity",
++	"task_failed":        "agent_activity",
++	"agent_blocked":      "agent_activity",
++	"agent_completed":    "agent_activity",
+ }
+ 
+ // isNotifMuted returns true if the given notification type is muted for a user
+@@ -657,7 +660,7 @@ func registerNotificationListeners(bus *events.Bus, queries *db.Queries) {
+ 				assigneeDetails)
+ 		}
+ 
+-		if statusChanged {
++		if statusChanged && shouldNotifyStatusChangeSubscribers(e) {
+ 			prevStatus, _ := payload["prev_status"].(string)
+ 			statusDetails, _ := json.Marshal(map[string]string{
+ 				"from": prevStatus,
+-- 
+2.34.1
+

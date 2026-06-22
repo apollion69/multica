@@ -1,0 +1,34 @@
+From 60eb8b8c37cbe91f30ee8e6c7b24dac523feb151 Mon Sep 17 00:00:00 2001
+From: "e.romanov" <e.romanov@ve-lab.com>
+Date: Thu, 11 Jun 2026 18:55:05 +0300
+Subject: [PATCH 4/6] local: add Gemini runtime pricing (2026-06-11)
+
+---
+ packages/views/runtimes/utils.ts | 11 +++++++++++
+ 1 file changed, 11 insertions(+)
+
+diff --git a/packages/views/runtimes/utils.ts b/packages/views/runtimes/utils.ts
+index 37e8e4e67..87b354983 100644
+--- a/packages/views/runtimes/utils.ts
++++ b/packages/views/runtimes/utils.ts
+@@ -186,6 +186,17 @@ const MODEL_PRICING: Record<
+   "gpt-5-nano":         { input: 0.05, output: 0.40, cacheRead: 0.005, cacheWrite: 0.05 },
+   "gpt-5":              { input: 1.25, output: 10,   cacheRead: 0.125, cacheWrite: 1.25 },
+ 
++  // -- Google Gemini API: Standard Paid Tier, text/image/video rates.
++  //    Aggregated usage rows do not expose request-time tier, modality, or
++  //    prompt-size split, so these rows use the Standard text/image/video
++  //    rates for prompts <=200K where Google publishes threshold pricing. --
++  "gemini-3.5-flash":       { input: 1.50, output: 9.00, cacheRead: 0.15,  cacheWrite: 1.50 },
++  "gemini-3.1-pro-preview": { input: 2.00, output: 12.00, cacheRead: 0.20,  cacheWrite: 2.00 },
++  "gemini-3.1-flash-lite":  { input: 0.25, output: 1.50, cacheRead: 0.025, cacheWrite: 0.25 },
++  "gemini-3-flash-preview": { input: 0.50, output: 3.00, cacheRead: 0.05,  cacheWrite: 0.50 },
++  "gemini-2.5-pro":         { input: 1.25, output: 10.00, cacheRead: 0.125, cacheWrite: 1.25 },
++  "gemini-2.5-flash":       { input: 0.30, output: 2.50, cacheRead: 0.03,  cacheWrite: 0.30 },
++
+   // -- OpenAI: o-series reasoning models --
+   "o3-mini":            { input: 1.10, output: 4.40, cacheRead: 0.55,  cacheWrite: 1.10 },
+   "o3":                 { input: 2,    output: 8,    cacheRead: 0.50,  cacheWrite: 2 },
+-- 
+2.34.1
+

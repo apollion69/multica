@@ -1,0 +1,223 @@
+From d6d54c0d6e61449356d3d0815e9aa84a1f16db3c Mon Sep 17 00:00:00 2001
+From: ops <ops@ve-lab.com>
+Date: Fri, 29 May 2026 01:44:58 +0300
+Subject: [PATCH 1/6] =?UTF-8?q?local:=20act-as-member=20attribution=20patc?=
+ =?UTF-8?q?h=20(D-491)=20=E2=80=94=20not=20upstream;=20reapplied=20by=20mu?=
+ =?UTF-8?q?ltica-upgrade.sh?=
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+---
+ act-as-member.diff                 | 98 ++++++++++++++++++++++++++++++
+ server/cmd/multica/cmd_agent.go    |  7 +++
+ server/internal/cli/client.go      |  4 ++
+ server/internal/handler/handler.go | 40 +++++++++++-
+ 4 files changed, 148 insertions(+), 1 deletion(-)
+ create mode 100644 act-as-member.diff
+
+diff --git a/act-as-member.diff b/act-as-member.diff
+new file mode 100644
+index 000000000..4f79c7c90
+--- /dev/null
++++ b/act-as-member.diff
+@@ -0,0 +1,98 @@
++diff --git a/server/cmd/multica/cmd_agent.go b/server/cmd/multica/cmd_agent.go
++index 3eb9c5559..d0aca1770 100644
++--- a/server/cmd/multica/cmd_agent.go
+++++ b/server/cmd/multica/cmd_agent.go
++@@ -239,6 +239,13 @@ func newAPIClient(cmd *cobra.Command) (*cli.APIClient, error) {
++ 	if taskID := os.Getenv("MULTICA_TASK_ID"); taskID != "" {
++ 		client.TaskID = taskID
++ 	}
+++	// Act-as-member: same env->header plumbing as MULTICA_AGENT_ID above, but a
+++	// distinct server path (the member branch of resolveActor, not the agent
+++	// branch). The server honors it only for an owner/admin caller whose target
+++	// is a workspace member; otherwise it falls back to the token owner.
+++	if onBehalfOf := os.Getenv("MULTICA_ON_BEHALF_OF"); onBehalfOf != "" {
+++		client.OnBehalfOf = onBehalfOf
+++	}
++ 	return client, nil
++ }
++ 
++diff --git a/server/internal/cli/client.go b/server/internal/cli/client.go
++index d4814eba8..4fcc3bc2d 100644
++--- a/server/internal/cli/client.go
+++++ b/server/internal/cli/client.go
++@@ -50,6 +50,7 @@ type APIClient struct {
++ 	Token       string
++ 	AgentID     string // When set, requests are attributed to this agent instead of the user.
++ 	TaskID      string // When set, sent as X-Task-ID for agent-task validation.
+++	OnBehalfOf  string // When set, a privileged token attributes the action to this member (X-On-Behalf-Of).
++ 	HTTPClient  *http.Client
++ 
++ 	// Identity overrides. Empty values fall back to the package-level
++@@ -93,6 +94,9 @@ func (c *APIClient) setHeaders(req *http.Request) {
++ 	if c.TaskID != "" {
++ 		req.Header.Set("X-Task-ID", c.TaskID)
++ 	}
+++	if c.OnBehalfOf != "" {
+++		req.Header.Set("X-On-Behalf-Of", c.OnBehalfOf)
+++	}
++ 
++ 	platform := c.Platform
++ 	if platform == "" {
++diff --git a/server/internal/handler/handler.go b/server/internal/handler/handler.go
++index d6a40baee..a3575f960 100644
++--- a/server/internal/handler/handler.go
+++++ b/server/internal/handler/handler.go
++@@ -301,7 +301,8 @@ func (h *Handler) resolveActor(r *http.Request, userID, workspaceID string) (act
++ 	}
++ 	agentID := r.Header.Get("X-Agent-ID")
++ 	if agentID == "" {
++-		return "member", userID
+++		// No agent context: optionally honor an act-as-member override.
+++		return h.resolveMemberActor(r, userID, workspaceID)
++ 	}
++ 	taskID := r.Header.Get("X-Task-ID")
++ 	if taskID == "" {
++@@ -382,6 +383,43 @@ func (h *Handler) workspaceMember(w http.ResponseWriter, r *http.Request, worksp
++ 	return h.requireWorkspaceMember(w, r, workspaceID, "workspace not found")
++ }
++ 
+++// resolveMemberActor honors an X-On-Behalf-Of override that lets a privileged
+++// (owner/admin) caller attribute an action to another workspace member. Any
+++// failure — header absent, caller not privileged, or target not a member of the
+++// workspace — falls back to the authenticated token owner. The auth middleware
+++// derives userID from the token, so this header can only redirect attribution,
+++// never escalate it.
+++func (h *Handler) resolveMemberActor(r *http.Request, userID, workspaceID string) (actorType, actorID string) {
+++	onBehalfOf := r.Header.Get("X-On-Behalf-Of")
+++	if onBehalfOf == "" || onBehalfOf == userID {
+++		return "member", userID
+++	}
+++
+++	caller, err := h.getWorkspaceMember(r.Context(), userID, workspaceID)
+++	if err != nil {
+++		if !isNotFound(err) {
+++			slog.Warn("resolveActor: caller member lookup failed, falling back to token owner", "user_id", userID, "workspace_id", workspaceID, "error", err)
+++		}
+++		return "member", userID
+++	}
+++	if !roleAllowed(caller.Role, "owner", "admin") {
+++		slog.Debug("resolveActor: X-On-Behalf-Of ignored, caller not owner/admin", "user_id", userID, "workspace_id", workspaceID)
+++		return "member", userID
+++	}
+++
+++	if _, err := h.getWorkspaceMember(r.Context(), onBehalfOf, workspaceID); err != nil {
+++		if !isNotFound(err) {
+++			slog.Warn("resolveActor: target member lookup failed, falling back to token owner", "target_id", onBehalfOf, "workspace_id", workspaceID, "error", err)
+++		} else {
+++			slog.Debug("resolveActor: X-On-Behalf-Of ignored, target not a workspace member", "target_id", onBehalfOf, "workspace_id", workspaceID)
+++		}
+++		return "member", userID
+++	}
+++
+++	slog.Info("resolveActor: attributing on behalf of member", "caller", userID, "on_behalf_of", onBehalfOf, "workspace_id", workspaceID)
+++	return "member", onBehalfOf
+++}
+++
++ func roleAllowed(role string, roles ...string) bool {
++ 	for _, candidate := range roles {
++ 		if role == candidate {
+diff --git a/server/cmd/multica/cmd_agent.go b/server/cmd/multica/cmd_agent.go
+index 87e6d63ed..58c33fe4a 100644
+--- a/server/cmd/multica/cmd_agent.go
++++ b/server/cmd/multica/cmd_agent.go
+@@ -256,6 +256,13 @@ func newAPIClient(cmd *cobra.Command) (*cli.APIClient, error) {
+ 	if taskID := os.Getenv("MULTICA_TASK_ID"); taskID != "" {
+ 		client.TaskID = taskID
+ 	}
++	// Act-as-member: same env->header plumbing as MULTICA_AGENT_ID above, but a
++	// distinct server path (the member branch of resolveActor, not the agent
++	// branch). The server honors it only for an owner/admin caller whose target
++	// is a workspace member; otherwise it falls back to the token owner.
++	if onBehalfOf := os.Getenv("MULTICA_ON_BEHALF_OF"); onBehalfOf != "" {
++		client.OnBehalfOf = onBehalfOf
++	}
+ 	return client, nil
+ }
+ 
+diff --git a/server/internal/cli/client.go b/server/internal/cli/client.go
+index 07450882d..9949311b4 100644
+--- a/server/internal/cli/client.go
++++ b/server/internal/cli/client.go
+@@ -52,6 +52,7 @@ type APIClient struct {
+ 	Token       string
+ 	AgentID     string // When set, requests are attributed to this agent instead of the user.
+ 	TaskID      string // When set, sent as X-Task-ID for agent-task validation.
++	OnBehalfOf  string // When set, a privileged token attributes the action to this member (X-On-Behalf-Of).
+ 	HTTPClient  *http.Client
+ 
+ 	// Identity overrides. Empty values fall back to the package-level
+@@ -174,6 +175,9 @@ func (c *APIClient) setHeaders(req *http.Request) {
+ 	if c.TaskID != "" {
+ 		req.Header.Set("X-Task-ID", c.TaskID)
+ 	}
++	if c.OnBehalfOf != "" {
++		req.Header.Set("X-On-Behalf-Of", c.OnBehalfOf)
++	}
+ 
+ 	platform := c.Platform
+ 	if platform == "" {
+diff --git a/server/internal/handler/handler.go b/server/internal/handler/handler.go
+index df37d2df6..feb6b5cd2 100644
+--- a/server/internal/handler/handler.go
++++ b/server/internal/handler/handler.go
+@@ -362,7 +362,8 @@ func (h *Handler) resolveActor(r *http.Request, userID, workspaceID string) (act
+ 	}
+ 	agentID := r.Header.Get("X-Agent-ID")
+ 	if agentID == "" {
+-		return "member", userID
++		// No agent context: optionally honor an act-as-member override.
++		return h.resolveMemberActor(r, userID, workspaceID)
+ 	}
+ 	taskID := r.Header.Get("X-Task-ID")
+ 	if taskID == "" {
+@@ -443,6 +444,43 @@ func (h *Handler) workspaceMember(w http.ResponseWriter, r *http.Request, worksp
+ 	return h.requireWorkspaceMember(w, r, workspaceID, "workspace not found")
+ }
+ 
++// resolveMemberActor honors an X-On-Behalf-Of override that lets a privileged
++// (owner/admin) caller attribute an action to another workspace member. Any
++// failure — header absent, caller not privileged, or target not a member of the
++// workspace — falls back to the authenticated token owner. The auth middleware
++// derives userID from the token, so this header can only redirect attribution,
++// never escalate it.
++func (h *Handler) resolveMemberActor(r *http.Request, userID, workspaceID string) (actorType, actorID string) {
++	onBehalfOf := r.Header.Get("X-On-Behalf-Of")
++	if onBehalfOf == "" || onBehalfOf == userID {
++		return "member", userID
++	}
++
++	caller, err := h.getWorkspaceMember(r.Context(), userID, workspaceID)
++	if err != nil {
++		if !isNotFound(err) {
++			slog.Warn("resolveActor: caller member lookup failed, falling back to token owner", "user_id", userID, "workspace_id", workspaceID, "error", err)
++		}
++		return "member", userID
++	}
++	if !roleAllowed(caller.Role, "owner", "admin") {
++		slog.Debug("resolveActor: X-On-Behalf-Of ignored, caller not owner/admin", "user_id", userID, "workspace_id", workspaceID)
++		return "member", userID
++	}
++
++	if _, err := h.getWorkspaceMember(r.Context(), onBehalfOf, workspaceID); err != nil {
++		if !isNotFound(err) {
++			slog.Warn("resolveActor: target member lookup failed, falling back to token owner", "target_id", onBehalfOf, "workspace_id", workspaceID, "error", err)
++		} else {
++			slog.Debug("resolveActor: X-On-Behalf-Of ignored, target not a workspace member", "target_id", onBehalfOf, "workspace_id", workspaceID)
++		}
++		return "member", userID
++	}
++
++	slog.Info("resolveActor: attributing on behalf of member", "caller", userID, "on_behalf_of", onBehalfOf, "workspace_id", workspaceID)
++	return "member", onBehalfOf
++}
++
+ func roleAllowed(role string, roles ...string) bool {
+ 	for _, candidate := range roles {
+ 		if role == candidate {
+-- 
+2.34.1
+

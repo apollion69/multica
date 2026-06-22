@@ -1,0 +1,49 @@
+From b0f282c5d9ee585936571bcf7c6f76d23eb1cacb Mon Sep 17 00:00:00 2001
+From: "e.romanov" <e.romanov@ve-lab.com>
+Date: Thu, 11 Jun 2026 19:10:25 +0300
+Subject: [PATCH 5/6] local: add Codex Spark pricing and catalog (2026-06-11)
+
+---
+ packages/views/runtimes/utils.ts | 5 +++++
+ server/pkg/agent/models.go       | 2 ++
+ 2 files changed, 7 insertions(+)
+
+diff --git a/packages/views/runtimes/utils.ts b/packages/views/runtimes/utils.ts
+index 87b354983..7b6b7576f 100644
+--- a/packages/views/runtimes/utils.ts
++++ b/packages/views/runtimes/utils.ts
+@@ -179,6 +179,11 @@ const MODEL_PRICING: Record<
+   "gpt-5.4-mini":       { input: 0.75, output: 4.50, cacheRead: 0.075, cacheWrite: 0.75 },
+   "gpt-5.4":            { input: 2.50, output: 15,   cacheRead: 0.25,  cacheWrite: 2.50 },
+   "gpt-5.3-codex":      { input: 1.75, output: 14,   cacheRead: 0.175, cacheWrite: 1.75 },
++  // `gpt-5.3-codex-spark` is a Codex Pro research-preview entitlement
++  // with separate usage limits and no public per-token API price. Keep it
++  // maintained at zero cost so usage tokens remain visible instead of being
++  // dropped from totals as an unmapped SKU.
++  "gpt-5.3-codex-spark": { input: 0,    output: 0,    cacheRead: 0,     cacheWrite: 0 },
+ 
+   // -- OpenAI: GPT-5 family (Codex CLI's default is gpt-5-codex; -codex/-mini/-nano variants priced per OpenAI tiers) --
+   "gpt-5-codex":        { input: 1.25, output: 10,   cacheRead: 0.125, cacheWrite: 1.25 },
+diff --git a/server/pkg/agent/models.go b/server/pkg/agent/models.go
+index fea6d3abd..6a86a2b04 100644
+--- a/server/pkg/agent/models.go
++++ b/server/pkg/agent/models.go
+@@ -227,6 +227,7 @@ func codexStaticModels() []Model {
+ 		{ID: "gpt-5.4", Label: "GPT-5.4", Provider: "openai"},
+ 		{ID: "gpt-5.4-mini", Label: "GPT-5.4 mini", Provider: "openai"},
+ 		{ID: "gpt-5.3-codex", Label: "GPT-5.3 Codex", Provider: "openai"},
++		{ID: "gpt-5.3-codex-spark", Label: "GPT-5.3 Codex Spark", Provider: "openai"},
+ 		{ID: "gpt-5", Label: "GPT-5", Provider: "openai"},
+ 		{ID: "o3", Label: "o3", Provider: "openai"},
+ 		{ID: "o3-mini", Label: "o3-mini", Provider: "openai"},
+@@ -287,6 +288,7 @@ func copilotStaticModels() []Model {
+ 		{ID: "gpt-5.4", Label: "GPT-5.4", Provider: "openai"},
+ 		{ID: "gpt-5.4-mini", Label: "GPT-5.4 mini", Provider: "openai"},
+ 		{ID: "gpt-5.3-codex", Label: "GPT-5.3-Codex", Provider: "openai"},
++		{ID: "gpt-5.3-codex-spark", Label: "GPT-5.3-Codex-Spark", Provider: "openai"},
+ 		{ID: "gpt-5.2-codex", Label: "GPT-5.2-Codex", Provider: "openai"},
+ 		{ID: "gpt-5.2", Label: "GPT-5.2", Provider: "openai"},
+ 		{ID: "gpt-5-mini", Label: "GPT-5 mini", Provider: "openai"},
+-- 
+2.34.1
+
