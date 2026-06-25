@@ -1,0 +1,42 @@
+diff --git a/server/pkg/db/generated/issue.sql.go b/server/pkg/db/generated/issue.sql.go
+index 31a1a1a60..9dec3f729 100644
+--- a/server/pkg/db/generated/issue.sql.go
++++ b/server/pkg/db/generated/issue.sql.go
+@@ -762,7 +762,7 @@ func (q *Queries) ListChildrenByParents(ctx context.Context, arg ListChildrenByP
+ const listIssues = `-- name: ListIssues :many
+ SELECT i.id, i.workspace_id, i.title, i.description, i.status, i.priority,
+        i.assignee_type, i.assignee_id, i.creator_type, i.creator_id,
+-       i.parent_issue_id, i.position, i.start_date, i.due_date, i.created_at, i.updated_at, i.number, i.project_id, i.metadata, i.stage
++       i.parent_issue_id, i.position, i.start_date, i.due_date, i.created_at, i.updated_at, i.number, i.project_id, i.origin_type, i.metadata, i.stage
+ FROM issue i
+ WHERE i.workspace_id = $1
+   AND ($4::text IS NULL OR i.status = $4)
+@@ -851,6 +851,7 @@ type ListIssuesRow struct {
+ 	UpdatedAt     pgtype.Timestamptz `json:"updated_at"`
+ 	Number        int32              `json:"number"`
+ 	ProjectID     pgtype.UUID        `json:"project_id"`
++	OriginType    pgtype.Text        `json:"origin_type"`
+ 	Metadata      []byte             `json:"metadata"`
+ 	Stage         pgtype.Int4        `json:"stage"`
+ }
+@@ -902,6 +903,7 @@ func (q *Queries) ListIssues(ctx context.Context, arg ListIssuesParams) ([]ListI
+ 			&i.UpdatedAt,
+ 			&i.Number,
+ 			&i.ProjectID,
++			&i.OriginType,
+ 			&i.Metadata,
+ 			&i.Stage,
+ 		); err != nil {
+diff --git a/server/pkg/db/queries/issue.sql b/server/pkg/db/queries/issue.sql
+index 5e2146bac..0f5c3c95d 100644
+--- a/server/pkg/db/queries/issue.sql
++++ b/server/pkg/db/queries/issue.sql
+@@ -7,7 +7,7 @@
+ -- "Assigned to me"), and the two filters must produce disjoint result sets.
+ SELECT i.id, i.workspace_id, i.title, i.description, i.status, i.priority,
+        i.assignee_type, i.assignee_id, i.creator_type, i.creator_id,
+-       i.parent_issue_id, i.position, i.start_date, i.due_date, i.created_at, i.updated_at, i.number, i.project_id, i.metadata, i.stage
++       i.parent_issue_id, i.position, i.start_date, i.due_date, i.created_at, i.updated_at, i.number, i.project_id, i.origin_type, i.metadata, i.stage
+ FROM issue i
+ WHERE i.workspace_id = $1
+   AND (sqlc.narg('status')::text IS NULL OR i.status = sqlc.narg('status'))

@@ -45,12 +45,12 @@ type codexSandboxPolicy struct {
 // codexSandboxPolicyFor picks the right policy for the given platform and
 // detected Codex CLI version.
 //
-// - Non-darwin: always workspace-write with network access (Landlock is not
-//   affected by the macOS Seatbelt bug).
-// - darwin with a version at or above CodexDarwinNetworkAccessFixedVersion:
-//   workspace-write with network access (upstream bug fixed).
-// - darwin otherwise (including when the version is unknown): fall back to
-//   danger-full-access so the Multica CLI can reach the API.
+//   - Non-darwin: always workspace-write with network access (Landlock is not
+//     affected by the macOS Seatbelt bug).
+//   - darwin with a version at or above CodexDarwinNetworkAccessFixedVersion:
+//     workspace-write with network access (upstream bug fixed).
+//   - darwin otherwise (including when the version is unknown): fall back to
+//     danger-full-access so the Multica CLI can reach the API.
 func codexSandboxPolicyFor(goos, detectedVersion string) codexSandboxPolicy {
 	if goos == "" {
 		goos = runtime.GOOS
@@ -135,6 +135,8 @@ func renderMulticaManagedBlock(policy codexSandboxPolicy) string {
 	if policy.Mode == "workspace-write" {
 		b.WriteString(fmt.Sprintf("sandbox_workspace_write.network_access = %t\n", policy.NetworkAccess))
 	}
+	b.WriteString("shell_environment_policy.inherit = \"all\"\n")
+	b.WriteString("shell_environment_policy.ignore_default_excludes = false\n")
 	b.WriteString(multicaManagedEndMarker)
 	b.WriteString("\n")
 	return b.String()
