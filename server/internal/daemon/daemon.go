@@ -3743,7 +3743,7 @@ func (d *Daemon) runTask(ctx context.Context, task Task, provider string, slot i
 	if env.CodexHome != "" {
 		agentEnv["CODEX_HOME"] = env.CodexHome
 		agentEnv["HOME"] = env.RootDir
-		if err := ensureCodexHomeAlias(env.RootDir, env.CodexHome); err != nil {
+		if err := ensureNoCodexHomeAlias(env.RootDir, env.CodexHome); err != nil {
 			return TaskResult{}, err
 		}
 	}
@@ -4648,31 +4648,30 @@ func composeOpenclawIncludeRoots(addRoot, userValue string) (string, bool) {
 	return strings.Join(parts, string(os.PathListSeparator)), true
 }
 
-func ensureCodexHomeAlias(rootDir, codexHome string) error {
+func ensureNoCodexHomeAlias(rootDir, codexHome string) error {
 	if rootDir == "" || codexHome == "" {
-		return fmt.Errorf("codex home alias: rootDir and codexHome are required")
+		return fmt.Errorf("codex home alias cleanup: rootDir and codexHome are required")
 	}
 	alias := filepath.Join(rootDir, ".codex")
 	info, err := os.Lstat(alias)
-	if err == nil {
-		if info.Mode()&os.ModeSymlink == 0 {
-			return fmt.Errorf("codex home alias: %s exists and is not a symlink", alias)
-		}
-		target, err := os.Readlink(alias)
-		if err != nil {
-			return fmt.Errorf("read codex home alias: %w", err)
-		}
-		if target == codexHome {
-			return nil
-		}
-		if err := os.Remove(alias); err != nil {
-			return fmt.Errorf("replace codex home alias: %w", err)
-		}
-	} else if !os.IsNotExist(err) {
+	if os.IsNotExist(err) {
+		return nil
+	}
+	if err != nil {
 		return fmt.Errorf("stat codex home alias: %w", err)
 	}
-	if err := os.Symlink(codexHome, alias); err != nil {
-		return fmt.Errorf("create codex home alias: %w", err)
+	if info.Mode()&os.ModeSymlink == 0 {
+		return fmt.Errorf("codex home alias: %s exists and is not a symlink", alias)
+	}
+	target, err := os.Readlink(alias)
+	if err != nil {
+		return fmt.Errorf("read codex home alias: %w", err)
+	}
+	if target != codexHome {
+		return fmt.Errorf("codex home alias: %s points to unexpected target %s", alias, target)
+	}
+	if err := os.Remove(alias); err != nil {
+		return fmt.Errorf("remove codex home alias: %w", err)
 	}
 	return nil
 }

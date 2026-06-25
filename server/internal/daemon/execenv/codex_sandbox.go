@@ -173,15 +173,17 @@ func EnsureCodexTaskShellEnvConfig(configPath string, env map[string]string) err
 	if err != nil {
 		return fmt.Errorf("read config.toml: %w", err)
 	}
+	content := string(data)
 	updates := codexShellEnvUpdates(env)
-	if len(updates) == 0 {
+	writableRoots := codexSandboxWritableRoots(content, env)
+	if len(updates) == 0 && len(writableRoots) == 0 {
 		return nil
 	}
-	updated, ok := upsertCodexShellEnvSet(string(data), updates)
+	updated, ok := upsertCodexManagedTaskSettings(content, updates, writableRoots)
 	if !ok {
 		return fmt.Errorf("codex shell env config: multica-managed block not found")
 	}
-	if updated != string(data) {
+	if updated != content {
 		if err := os.WriteFile(configPath, []byte(updated), 0o600); err != nil {
 			return fmt.Errorf("write config.toml: %w", err)
 		}
@@ -206,6 +208,87 @@ func codexShellEnvUpdates(env map[string]string) []string {
 		lines = append(lines, fmt.Sprintf("shell_environment_policy.set.%s = %s", key, strconv.Quote(env[key])))
 	}
 	return lines
+}
+
+var (
+	codexWritableRootsLineRe = regexp.MustCompile(`(?m)^\s*sandbox_workspace_write\.writable_roots\s*=\s*\[(.*?)\]\s*$`)
+	codexQuotedStringRe      = regexp.MustCompile(`"(?:\\.|[^"\\])*"`)
+)
+
+func codexSandboxWritableRoots(content string, env map[string]string) []string {
+	seen := make(map[string]struct{})
+	roots := make([]string, 0, 4)
+	add := func(root string) {
+		root = strings.TrimSpace(root)
+		if root == "" {
+			return
+		}
+		if _, ok := seen[root]; ok {
+			return
+		}
+		seen[root] = struct{}{}
+		roots = append(roots, root)
+	}
+	for _, match := range codexWritableRootsLineRe.FindAllStringSubmatch(content, -1) {
+		for _, raw := range codexQuotedStringRe.FindAllString(match[1], -1) {
+			unquoted, err := strconv.Unquote(raw)
+			if err == nil {
+				add(unquoted)
+			}
+		}
+	}
+	add(env["HOME"])
+	add(env["CODEX_HOME"])
+	return roots
+}
+
+func formatCodexWritableRoots(roots []string) string {
+	quoted := make([]string, 0, len(roots))
+	for _, root := range roots {
+		quoted = append(quoted, strconv.Quote(root))
+	}
+	return "sandbox_workspace_write.writable_roots = [" + strings.Join(quoted, ", ") + "]"
+}
+
+func upsertCodexManagedTaskSettings(content string, envUpdates []string, writableRoots []string) (string, bool) {
+	if len(writableRoots) > 0 {
+		content = codexWritableRootsLineRe.ReplaceAllString(content, "")
+	}
+	match := managedBlockRe.FindStringIndex(content)
+	if match == nil {
+		return "", false
+	}
+	block := content[match[0]:match[1]]
+	lines := strings.Split(block, "\n")
+	out := make([]string, 0, len(lines)+len(envUpdates)+1)
+	envInserted := false
+	rootsInserted := false
+	for _, line := range lines {
+		trimmed := strings.TrimSpace(line)
+		if strings.HasPrefix(trimmed, "shell_environment_policy.set.") {
+			continue
+		}
+		if strings.HasPrefix(trimmed, "sandbox_workspace_write.writable_roots") {
+			continue
+		}
+		if !rootsInserted && len(writableRoots) > 0 && strings.HasPrefix(trimmed, "shell_environment_policy.") {
+			out = append(out, formatCodexWritableRoots(writableRoots))
+			rootsInserted = true
+		}
+		if !envInserted && trimmed == multicaManagedEndMarker {
+			if !rootsInserted && len(writableRoots) > 0 {
+				out = append(out, formatCodexWritableRoots(writableRoots))
+				rootsInserted = true
+			}
+			out = append(out, envUpdates...)
+			envInserted = true
+		}
+		out = append(out, line)
+	}
+	if !envInserted {
+		return "", false
+	}
+	return content[:match[0]] + strings.Join(out, "\n") + content[match[1]:], true
 }
 
 func upsertCodexShellEnvSet(content string, updates []string) (string, bool) {

@@ -905,7 +905,7 @@ func TestWatchTaskCancellation_RunningTaskNotInterrupted(t *testing.T) {
 	}
 }
 
-func TestEnsureCodexHomeAlias(t *testing.T) {
+func TestEnsureNoCodexHomeAliasRemovesManagedSymlink(t *testing.T) {
 	t.Parallel()
 
 	root := t.TempDir()
@@ -913,31 +913,47 @@ func TestEnsureCodexHomeAlias(t *testing.T) {
 	if err := os.MkdirAll(codexHome, 0o755); err != nil {
 		t.Fatalf("mkdir codex home: %v", err)
 	}
-	if err := ensureCodexHomeAlias(root, codexHome); err != nil {
-		t.Fatalf("ensureCodexHomeAlias failed: %v", err)
+	if err := os.Symlink(codexHome, filepath.Join(root, ".codex")); err != nil {
+		t.Fatalf("create .codex symlink: %v", err)
 	}
-	if err := ensureCodexHomeAlias(root, codexHome); err != nil {
-		t.Fatalf("ensureCodexHomeAlias should be idempotent: %v", err)
+	if err := ensureNoCodexHomeAlias(root, codexHome); err != nil {
+		t.Fatalf("ensureNoCodexHomeAlias failed: %v", err)
 	}
-	target, err := os.Readlink(filepath.Join(root, ".codex"))
-	if err != nil {
-		t.Fatalf("read .codex alias: %v", err)
+	if _, err := os.Lstat(filepath.Join(root, ".codex")); !os.IsNotExist(err) {
+		t.Fatalf(".codex alias should be removed, got err=%v", err)
 	}
-	if target != codexHome {
-		t.Fatalf(".codex target = %q, want %q", target, codexHome)
+	if err := ensureNoCodexHomeAlias(root, codexHome); err != nil {
+		t.Fatalf("ensureNoCodexHomeAlias should be idempotent: %v", err)
 	}
 }
 
-func TestEnsureCodexHomeAliasRejectsDirectory(t *testing.T) {
+func TestEnsureNoCodexHomeAliasRejectsDirectory(t *testing.T) {
 	t.Parallel()
 
 	root := t.TempDir()
 	if err := os.Mkdir(filepath.Join(root, ".codex"), 0o755); err != nil {
 		t.Fatalf("mkdir .codex: %v", err)
 	}
-	err := ensureCodexHomeAlias(root, filepath.Join(root, "codex-home"))
+	err := ensureNoCodexHomeAlias(root, filepath.Join(root, "codex-home"))
 	if err == nil || !strings.Contains(err.Error(), "not a symlink") {
-		t.Fatalf("ensureCodexHomeAlias error = %v, want not-a-symlink error", err)
+		t.Fatalf("ensureNoCodexHomeAlias error = %v, want not-a-symlink error", err)
+	}
+}
+
+func TestEnsureNoCodexHomeAliasRejectsUnexpectedSymlink(t *testing.T) {
+	t.Parallel()
+
+	root := t.TempDir()
+	other := filepath.Join(root, "other-codex-home")
+	if err := os.MkdirAll(other, 0o755); err != nil {
+		t.Fatalf("mkdir other codex home: %v", err)
+	}
+	if err := os.Symlink(other, filepath.Join(root, ".codex")); err != nil {
+		t.Fatalf("create unexpected .codex symlink: %v", err)
+	}
+	err := ensureNoCodexHomeAlias(root, filepath.Join(root, "codex-home"))
+	if err == nil || !strings.Contains(err.Error(), "unexpected target") {
+		t.Fatalf("ensureNoCodexHomeAlias error = %v, want unexpected-target error", err)
 	}
 }
 

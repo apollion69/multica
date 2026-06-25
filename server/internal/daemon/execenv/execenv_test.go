@@ -2524,6 +2524,54 @@ func TestEnsureCodexTaskShellEnvConfigSetsWhitelistedEnv(t *testing.T) {
 	}
 }
 
+func TestEnsureCodexTaskShellEnvConfigAddsTaskWritableRoots(t *testing.T) {
+	t.Parallel()
+
+	dir := t.TempDir()
+	configPath := filepath.Join(dir, "config.toml")
+	policy := codexSandboxPolicyFor("linux", "0.121.0")
+	if err := ensureCodexSandboxConfig(configPath, policy, "0.121.0", testLogger()); err != nil {
+		t.Fatalf("ensureCodexSandboxConfig failed: %v", err)
+	}
+	data, err := os.ReadFile(configPath)
+	if err != nil {
+		t.Fatalf("failed read config.toml: %v", err)
+	}
+	withLegacyRoot := strings.Replace(
+		string(data),
+		"sandbox_workspace_write.network_access = true\n",
+		"sandbox_workspace_write.network_access = true\nsandbox_workspace_write.writable_roots = [\"/repo\"]\n",
+		1,
+	)
+	if err := os.WriteFile(configPath, []byte(withLegacyRoot), 0o600); err != nil {
+		t.Fatalf("failed write config.toml: %v", err)
+	}
+
+	env := map[string]string{
+		"CODEX_HOME": "/tmp/task-root/codex-home",
+		"HOME":       "/tmp/task-root",
+	}
+	if err := EnsureCodexTaskShellEnvConfig(configPath, env); err != nil {
+		t.Fatalf("EnsureCodexTaskShellEnvConfig failed: %v", err)
+	}
+
+	data, err = os.ReadFile(configPath)
+	if err != nil {
+		t.Fatalf("failed read config.toml: %v", err)
+	}
+	s := string(data)
+	want := `sandbox_workspace_write.writable_roots = ["/repo", "/tmp/task-root", "/tmp/task-root/codex-home"]`
+	if !strings.Contains(s, want) {
+		t.Fatalf("config.toml missing task writable roots %q in:\n%s", want, s)
+	}
+	if strings.Count(s, "sandbox_workspace_write.writable_roots") != 1 {
+		t.Fatalf("expected exactly one writable_roots line in:\n%s", s)
+	}
+	if strings.Contains(s, "[sandbox_workspace_write]") {
+		t.Fatalf("managed block must not emit sandbox table header:\n%s", s)
+	}
+}
+
 func TestEnsureCodexTaskShellEnvConfigIsIdempotent(t *testing.T) {
 	t.Parallel()
 
