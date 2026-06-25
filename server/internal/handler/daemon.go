@@ -1417,6 +1417,10 @@ func (h *Handler) ClaimTaskByRuntime(w http.ResponseWriter, r *http.Request) {
 	if task.IssueID.Valid {
 		if issue, err := h.Queries.GetIssue(r.Context(), task.IssueID); err == nil {
 			resp.WorkspaceID = uuidToString(issue.WorkspaceID)
+			resp.IssueTitle = issue.Title
+			if issue.Description.Valid {
+				resp.IssueDescription = issue.Description.String
+			}
 			resp.ThreadName = issue.Title
 
 			// Squad-leader briefing injection: keyed off the task being a

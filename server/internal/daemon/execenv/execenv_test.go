@@ -366,7 +366,9 @@ func TestWriteContextFiles(t *testing.T) {
 	dir := t.TempDir()
 
 	ctx := TaskContextForEnv{
-		IssueID: "test-issue-id-1234",
+		IssueID:          "test-issue-id-1234",
+		IssueTitle:       "Runtime smoke",
+		IssueDescription: "Check task home, skills, and MCP.",
 		AgentSkills: []SkillContextForEnv{
 			{
 				Name:    "Go Conventions",
@@ -390,6 +392,8 @@ func TestWriteContextFiles(t *testing.T) {
 	s := string(content)
 	for _, want := range []string{
 		"test-issue-id-1234",
+		"Runtime smoke",
+		"Check task home, skills, and MCP.",
 		"## Agent Skills",
 		"Go Conventions",
 	} {

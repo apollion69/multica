@@ -578,7 +578,8 @@ func renderIssueContext(provider string, ctx TaskContextForEnv) string {
 	}
 
 	b.WriteString("## Quick Start\n\n")
-	fmt.Fprintf(&b, "Run `multica issue get %s --output json` to fetch the full issue details.\n\n", ctx.IssueID)
+	writeIssueSnapshot(&b, ctx)
+	fmt.Fprintf(&b, "Use `multica issue get %s --output json` when you need current status, comments, or attachments.\n\n", ctx.IssueID)
 
 	if len(ctx.AgentSkills) > 0 {
 		b.WriteString("## Agent Skills\n\n")
@@ -653,4 +654,21 @@ func renderAutopilotContext(ctx TaskContextForEnv) string {
 	}
 
 	return b.String()
+}
+
+func writeIssueSnapshot(b *strings.Builder, ctx TaskContextForEnv) {
+	title := strings.TrimSpace(ctx.IssueTitle)
+	description := strings.TrimSpace(ctx.IssueDescription)
+	if title == "" && description == "" {
+		return
+	}
+
+	b.WriteString("## Issue Snapshot\n\n")
+	if title != "" {
+		fmt.Fprintf(b, "**Title:** %s\n\n", title)
+	}
+	if description != "" {
+		b.WriteString(description)
+		b.WriteString("\n\n")
+	}
 }

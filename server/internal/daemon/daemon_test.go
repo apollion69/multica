@@ -365,8 +365,12 @@ func TestBuildPromptContainsIssueID(t *testing.T) {
 	t.Parallel()
 
 	issueID := "a1b2c3d4-e5f6-7890-abcd-ef1234567890"
+	issueTitle := "Audit Codex runtime"
+	issueDescription := "Run the runtime checks and post one JSON comment."
 	prompt := BuildPrompt(Task{
-		IssueID: issueID,
+		IssueID:          issueID,
+		IssueTitle:       issueTitle,
+		IssueDescription: issueDescription,
 		Agent: &AgentData{
 			Name: "Local Codex",
 			Skills: []SkillData{
@@ -378,6 +382,8 @@ func TestBuildPromptContainsIssueID(t *testing.T) {
 	// Prompt should contain the issue ID and CLI hint.
 	for _, want := range []string{
 		issueID,
+		issueTitle,
+		issueDescription,
 		"multica issue get",
 	} {
 		if !strings.Contains(prompt, want) {
@@ -393,18 +399,19 @@ func TestBuildPromptContainsIssueID(t *testing.T) {
 	}
 }
 
-func TestBuildPromptNoIssueDetails(t *testing.T) {
+func TestBuildPromptIncludesIssueSnapshot(t *testing.T) {
 	t.Parallel()
 
 	prompt := BuildPrompt(Task{
-		IssueID: "test-id",
-		Agent:   &AgentData{Name: "Test"},
+		IssueID:          "test-id",
+		IssueTitle:       "Runtime smoke",
+		IssueDescription: "Check task home, skills, and MCP.",
+		Agent:            &AgentData{Name: "Test"},
 	}, "claude")
 
-	// Prompt should not contain issue title/description (agent fetches via CLI).
-	for _, absent := range []string{"**Issue:**", "**Summary:**"} {
-		if strings.Contains(prompt, absent) {
-			t.Fatalf("prompt should NOT contain %q — agent fetches details via CLI", absent)
+	for _, want := range []string{"## Issue Snapshot", "**Title:** Runtime smoke", "Check task home, skills, and MCP."} {
+		if !strings.Contains(prompt, want) {
+			t.Fatalf("prompt missing issue snapshot %q", want)
 		}
 	}
 }

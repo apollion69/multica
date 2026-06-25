@@ -37,9 +37,28 @@ func BuildPrompt(task Task, provider string) string {
 		b.WriteString("You were handed this issue with a handoff note. Treat it as the assigner's scoping instruction for this run; follow it before doing anything broader, and do not reply to it as if it were a comment:\n\n")
 		fmt.Fprintf(&b, "> %s\n\n", task.HandoffNote)
 	}
-	fmt.Fprintf(&b, "Start by running `multica issue get %s --output json` to understand your task, then complete it.\n", task.IssueID)
+	writeIssueSnapshot(&b, task)
+	fmt.Fprintf(&b, "Start from the issue snapshot above. Run `multica issue get %s --output json` only when you need current status, comments, or attachments.\n", task.IssueID)
 	fmt.Fprintf(&b, "For comment history, follow the rule in your runtime workflow file (assignment-triggered tasks treat the read as mandatory). Start with `multica issue comment list %s --recent 10 --output json` to read the 10 most recently active threads, then page older threads via the stderr `Next thread cursor: ...` line and the matching `--before` / `--before-id` until you have enough history. Resolved threads come back folded — `--full` to expand. `--since <RFC3339>` is still available for incremental polling and may combine with `--recent`.\n", task.IssueID)
 	return b.String()
+}
+
+func writeIssueSnapshot(b *strings.Builder, task Task) {
+	title := strings.TrimSpace(task.IssueTitle)
+	description := strings.TrimSpace(task.IssueDescription)
+	if title == "" && description == "" {
+		return
+	}
+
+	b.WriteString("## Issue Snapshot\n\n")
+	if title != "" {
+		fmt.Fprintf(b, "**Title:** %s\n\n", title)
+	}
+	if description != "" {
+		b.WriteString(description)
+		b.WriteString("\n\n")
+	}
+	b.WriteString("Use this snapshot as the initial assignment. Run `multica issue get` only when you need current status, comments, or attachments.\n\n")
 }
 
 // buildQuickCreatePrompt constructs a prompt for quick-create tasks. The
@@ -147,6 +166,7 @@ func buildCommentPrompt(task Task, provider string) string {
 	var b strings.Builder
 	b.WriteString("You are running as a local coding agent for a Multica workspace.\n\n")
 	fmt.Fprintf(&b, "Your assigned issue ID is: %s\n\n", task.IssueID)
+	writeIssueSnapshot(&b, task)
 	if task.TriggerCommentContent != "" {
 		authorLabel := "A user"
 		if task.TriggerAuthorType == "agent" {
