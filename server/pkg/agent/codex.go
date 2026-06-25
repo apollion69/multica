@@ -96,6 +96,30 @@ type codexTimeoutDiagnostic struct {
 	CodexVersion string
 }
 
+type codexStderrLogWriter struct {
+	inner io.Writer
+}
+
+func newCodexStderrLogWriter(logger *slog.Logger) *codexStderrLogWriter {
+	return &codexStderrLogWriter{inner: newLogWriter(logger, "[codex:stderr] ")}
+}
+
+func (w *codexStderrLogWriter) Write(p []byte) (int, error) {
+	text := strings.TrimSpace(string(p))
+	if isNonFatalCodexMCPDeleteSessionStderr(text) {
+		return len(p), nil
+	}
+	if _, err := w.inner.Write(p); err != nil {
+		return 0, err
+	}
+	return len(p), nil
+}
+
+func isNonFatalCodexMCPDeleteSessionStderr(text string) bool {
+	return strings.Contains(text, "ERROR rmcp::transport::streamable_http_client: fail to delete session:") &&
+		strings.Contains(text, "session_id=")
+}
+
 // codexBackend implements Backend by spawning `codex app-server --listen stdio://`
 // and communicating via JSON-RPC 2.0 over stdin/stdout.
 type codexBackend struct {
@@ -638,7 +662,7 @@ func (b *codexBackend) Execute(ctx context.Context, prompt string, opts ExecOpti
 		cancel()
 		return nil, fmt.Errorf("codex stdin pipe: %w", err)
 	}
-	stderrBuf := newStderrTail(newLogWriter(b.cfg.Logger, "[codex:stderr] "), codexStderrTailBytes)
+	stderrBuf := newStderrTail(newCodexStderrLogWriter(b.cfg.Logger), codexStderrTailBytes)
 	cmd.Stderr = stderrBuf
 
 	if err := cmd.Start(); err != nil {

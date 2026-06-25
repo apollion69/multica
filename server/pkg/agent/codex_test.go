@@ -2617,3 +2617,36 @@ func TestHasManagedCodexMcpConfig(t *testing.T) {
 		})
 	}
 }
+
+func TestCodexStderrLogWriterSuppressesMCPDeleteSessionCleanup(t *testing.T) {
+	t.Parallel()
+
+	var buf bytes.Buffer
+	logger := slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelDebug}))
+	writer := newCodexStderrLogWriter(logger)
+	line := `2026-06-25T16:52:15.649317Z ERROR rmcp::transport::streamable_http_client: fail to delete session: Client error: HTTP request failed: http/request failed: error sending request for url (https://mcp.context7.com/mcp) session_id="ad56326e-7af9-4617-824e-591908018cf7"`
+
+	if _, err := writer.Write([]byte(line + "\n")); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+	if got := buf.String(); got != "" {
+		t.Fatalf("expected cleanup noise suppressed, got %q", got)
+	}
+}
+
+func TestCodexStderrLogWriterKeepsRouterErrors(t *testing.T) {
+	t.Parallel()
+
+	var buf bytes.Buffer
+	logger := slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelDebug}))
+	writer := newCodexStderrLogWriter(logger)
+	line := `2026-06-25T16:40:24.150575Z ERROR codex_core::tools::router: error=Command blocked by PreToolUse hook: BLOCKED: All Ansible commands must run on ansible-lx1 via ansible-logrun.sh.`
+
+	if _, err := writer.Write([]byte(line + "\n")); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+	got := buf.String()
+	if !strings.Contains(got, "codex_core::tools::router") {
+		t.Fatalf("expected router error to remain logged, got %q", got)
+	}
+}
