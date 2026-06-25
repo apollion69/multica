@@ -1,0 +1,309 @@
+diff --git a/server/internal/daemon/daemon.go b/server/internal/daemon/daemon.go
+index 1f5fb68c4..523f5b747 100644
+--- a/server/internal/daemon/daemon.go
++++ b/server/internal/daemon/daemon.go
+@@ -3662,6 +3662,16 @@ func (d *Daemon) runTask(ctx context.Context, task Task, provider string, slot i
+ 	// without polluting the system ~/.codex/skills/.
+ 	if env.CodexHome != "" {
+ 		agentEnv["CODEX_HOME"] = env.CodexHome
++		agentEnv["HOME"] = env.RootDir
++		if err := ensureCodexHomeAlias(env.RootDir, env.CodexHome); err != nil {
++			return TaskResult{}, err
++		}
++	}
++	if provider == "codex" && env.CodexHome != "" {
++		configPath := filepath.Join(env.CodexHome, "config.toml")
++		if err := execenv.EnsureCodexTaskShellEnvConfig(configPath, agentEnv); err != nil {
++			return TaskResult{}, fmt.Errorf("codex task shell env config: %w", err)
++		}
+ 	}
+ 	// Point Cursor at per-task project state when managed MCP is present.
+ 	// The workdir .cursor/mcp.json carries the managed server list, while
+@@ -4555,6 +4565,35 @@ func composeOpenclawIncludeRoots(addRoot, userValue string) (string, bool) {
+ 	return strings.Join(parts, string(os.PathListSeparator)), true
+ }
+ 
++func ensureCodexHomeAlias(rootDir, codexHome string) error {
++	if rootDir == "" || codexHome == "" {
++		return fmt.Errorf("codex home alias: rootDir and codexHome are required")
++	}
++	alias := filepath.Join(rootDir, ".codex")
++	info, err := os.Lstat(alias)
++	if err == nil {
++		if info.Mode()&os.ModeSymlink == 0 {
++			return fmt.Errorf("codex home alias: %s exists and is not a symlink", alias)
++		}
++		target, err := os.Readlink(alias)
++		if err != nil {
++			return fmt.Errorf("read codex home alias: %w", err)
++		}
++		if target == codexHome {
++			return nil
++		}
++		if err := os.Remove(alias); err != nil {
++			return fmt.Errorf("replace codex home alias: %w", err)
++		}
++	} else if !os.IsNotExist(err) {
++		return fmt.Errorf("stat codex home alias: %w", err)
++	}
++	if err := os.Symlink(codexHome, alias); err != nil {
++		return fmt.Errorf("create codex home alias: %w", err)
++	}
++	return nil
++}
++
+ // isBlockedEnvKey returns true if the key must not be overridden by user-
+ // configured custom_env. This prevents accidental or malicious override of
+ // daemon-internal variables and critical system paths.
+diff --git a/server/internal/daemon/daemon_test.go b/server/internal/daemon/daemon_test.go
+index fde3e042b..bb36866f8 100644
+--- a/server/internal/daemon/daemon_test.go
++++ b/server/internal/daemon/daemon_test.go
+@@ -160,6 +160,42 @@ func TestTaskScopedAuthToken(t *testing.T) {
+ 	}
+ }
+ 
++func TestEnsureCodexHomeAlias(t *testing.T) {
++	t.Parallel()
++
++	root := t.TempDir()
++	codexHome := filepath.Join(root, "codex-home")
++	if err := os.MkdirAll(codexHome, 0o755); err != nil {
++		t.Fatalf("mkdir codex home: %v", err)
++	}
++	if err := ensureCodexHomeAlias(root, codexHome); err != nil {
++		t.Fatalf("ensureCodexHomeAlias failed: %v", err)
++	}
++	if err := ensureCodexHomeAlias(root, codexHome); err != nil {
++		t.Fatalf("ensureCodexHomeAlias should be idempotent: %v", err)
++	}
++	target, err := os.Readlink(filepath.Join(root, ".codex"))
++	if err != nil {
++		t.Fatalf("read .codex alias: %v", err)
++	}
++	if target != codexHome {
++		t.Fatalf(".codex target = %q, want %q", target, codexHome)
++	}
++}
++
++func TestEnsureCodexHomeAliasRejectsDirectory(t *testing.T) {
++	t.Parallel()
++
++	root := t.TempDir()
++	if err := os.Mkdir(filepath.Join(root, ".codex"), 0o755); err != nil {
++		t.Fatalf("mkdir .codex: %v", err)
++	}
++	err := ensureCodexHomeAlias(root, filepath.Join(root, "codex-home"))
++	if err == nil || !strings.Contains(err.Error(), "not a symlink") {
++		t.Fatalf("ensureCodexHomeAlias error = %v, want not-a-symlink error", err)
++	}
++}
++
+ // When `brew --prefix` is unavailable but the executable path is under a
+ // known Cellar root, triggerRestart must recover the prefix from the
+ // known-prefix list and target <prefix>/bin/multica.
+diff --git a/server/internal/daemon/execenv/codex_sandbox.go b/server/internal/daemon/execenv/codex_sandbox.go
+index e56771683..b14e4e036 100644
+--- a/server/internal/daemon/execenv/codex_sandbox.go
++++ b/server/internal/daemon/execenv/codex_sandbox.go
+@@ -6,6 +6,7 @@ import (
+ 	"os"
+ 	"regexp"
+ 	"runtime"
++	"sort"
+ 	"strconv"
+ 	"strings"
+ )
+@@ -142,6 +143,97 @@ func renderMulticaManagedBlock(policy codexSandboxPolicy) string {
+ 	return b.String()
+ }
+ 
++var codexShellEnvSetKeys = map[string]struct{}{
++	"CODEX_HOME":                          {},
++	"HOME":                                {},
++	"MULTICA_AGENT_ID":                    {},
++	"MULTICA_AGENT_NAME":                  {},
++	"MULTICA_AUTOPILOT_ID":                {},
++	"MULTICA_AUTOPILOT_RUN_ID":            {},
++	"MULTICA_DAEMON_PORT":                 {},
++	"MULTICA_QUICK_CREATE_ATTACHMENT_IDS": {},
++	"MULTICA_QUICK_CREATE_TASK_ID":        {},
++	"MULTICA_SERVER_URL":                  {},
++	"MULTICA_TASK_ID":                     {},
++	"MULTICA_TASK_SLOT":                   {},
++	"MULTICA_TOKEN":                       {},
++	"MULTICA_WORKSPACE_ID":                {},
++	"PATH":                                {},
++}
++
++// EnsureCodexTaskShellEnvConfig writes daemon-controlled task environment
++// values into Codex's shell environment policy. Codex's default secret filter
++// blocks inherited TOKEN-like variables, so task-scoped MULTICA_TOKEN must be
++// an explicit policy override rather than relying on inherit = "all".
++func EnsureCodexTaskShellEnvConfig(configPath string, env map[string]string) error {
++	if configPath == "" {
++		return fmt.Errorf("codex shell env config: config path is required")
++	}
++	data, err := os.ReadFile(configPath)
++	if err != nil {
++		return fmt.Errorf("read config.toml: %w", err)
++	}
++	updates := codexShellEnvUpdates(env)
++	if len(updates) == 0 {
++		return nil
++	}
++	updated, ok := upsertCodexShellEnvSet(string(data), updates)
++	if !ok {
++		return fmt.Errorf("codex shell env config: multica-managed block not found")
++	}
++	if updated != string(data) {
++		if err := os.WriteFile(configPath, []byte(updated), 0o600); err != nil {
++			return fmt.Errorf("write config.toml: %w", err)
++		}
++		return os.Chmod(configPath, 0o600)
++	}
++	return os.Chmod(configPath, 0o600)
++}
++
++func codexShellEnvUpdates(env map[string]string) []string {
++	if len(env) == 0 {
++		return nil
++	}
++	keys := make([]string, 0, len(codexShellEnvSetKeys))
++	for key := range codexShellEnvSetKeys {
++		if env[key] != "" {
++			keys = append(keys, key)
++		}
++	}
++	sort.Strings(keys)
++	lines := make([]string, 0, len(keys))
++	for _, key := range keys {
++		lines = append(lines, fmt.Sprintf("shell_environment_policy.set.%s = %s", key, strconv.Quote(env[key])))
++	}
++	return lines
++}
++
++func upsertCodexShellEnvSet(content string, updates []string) (string, bool) {
++	match := managedBlockRe.FindStringIndex(content)
++	if match == nil {
++		return "", false
++	}
++	block := content[match[0]:match[1]]
++	lines := strings.Split(block, "\n")
++	out := make([]string, 0, len(lines)+len(updates))
++	inserted := false
++	for _, line := range lines {
++		trimmed := strings.TrimSpace(line)
++		if strings.HasPrefix(trimmed, "shell_environment_policy.set.") {
++			continue
++		}
++		if !inserted && trimmed == multicaManagedEndMarker {
++			out = append(out, updates...)
++			inserted = true
++		}
++		out = append(out, line)
++	}
++	if !inserted {
++		return "", false
++	}
++	return content[:match[0]] + strings.Join(out, "\n") + content[match[1]:], true
++}
++
+ // managedBlockRe captures the daemon-owned block (including the surrounding
+ // markers and any trailing blank lines) so it can be replaced idempotently.
+ // `\n*` rather than `\n?` so reruns don't accumulate blank lines when the
+diff --git a/server/internal/daemon/execenv/execenv_test.go b/server/internal/daemon/execenv/execenv_test.go
+index 34be76bab..d11f62bfb 100644
+--- a/server/internal/daemon/execenv/execenv_test.go
++++ b/server/internal/daemon/execenv/execenv_test.go
+@@ -2365,6 +2365,90 @@ func TestEnsureCodexSandboxConfigCreatesDefaultLinux(t *testing.T) {
+ 	}
+ }
+ 
++func TestEnsureCodexTaskShellEnvConfigSetsWhitelistedEnv(t *testing.T) {
++	t.Parallel()
++
++	dir := t.TempDir()
++	configPath := filepath.Join(dir, "config.toml")
++	policy := codexSandboxPolicyFor("linux", "0.121.0")
++	if err := ensureCodexSandboxConfig(configPath, policy, "0.121.0", testLogger()); err != nil {
++		t.Fatalf("ensureCodexSandboxConfig failed: %v", err)
++	}
++
++	env := map[string]string{
++		"CODEX_HOME":           "/tmp/task-codex-home",
++		"HOME":                 "/tmp/task-root",
++		"MULTICA_TOKEN":        "mat_task_token",
++		"MULTICA_SERVER_URL":   "http://127.0.0.1:8080",
++		"MULTICA_WORKSPACE_ID": "workspace-1",
++		"MULTICA_TASK_ID":      "task-1",
++		"PATH":                 "/usr/local/bin:/usr/bin",
++		"ANTHROPIC_API_KEY":    "must-not-leak",
++	}
++	if err := EnsureCodexTaskShellEnvConfig(configPath, env); err != nil {
++		t.Fatalf("EnsureCodexTaskShellEnvConfig failed: %v", err)
++	}
++
++	data, err := os.ReadFile(configPath)
++	if err != nil {
++		t.Fatalf("failed to read config.toml: %v", err)
++	}
++	s := string(data)
++	for _, want := range []string{
++		`shell_environment_policy.set.CODEX_HOME = "/tmp/task-codex-home"`,
++		`shell_environment_policy.set.HOME = "/tmp/task-root"`,
++		`shell_environment_policy.set.MULTICA_TOKEN = "mat_task_token"`,
++		`shell_environment_policy.set.MULTICA_SERVER_URL = "http://127.0.0.1:8080"`,
++		`shell_environment_policy.set.MULTICA_WORKSPACE_ID = "workspace-1"`,
++		`shell_environment_policy.set.MULTICA_TASK_ID = "task-1"`,
++		`shell_environment_policy.set.PATH = "/usr/local/bin:/usr/bin"`,
++	} {
++		if !strings.Contains(s, want) {
++			t.Errorf("config.toml missing %q, got:\n%s", want, s)
++		}
++	}
++	if strings.Contains(s, "ANTHROPIC_API_KEY") || strings.Contains(s, "must-not-leak") {
++		t.Fatalf("config.toml leaked non-whitelisted env, got:\n%s", s)
++	}
++	info, err := os.Stat(configPath)
++	if err != nil {
++		t.Fatalf("failed to stat config.toml: %v", err)
++	}
++	if got := info.Mode().Perm(); got != 0o600 {
++		t.Fatalf("config.toml mode = %v, want 0600 after token write", got)
++	}
++
++	env["MULTICA_TOKEN"] = "mat_next_token"
++	if err := EnsureCodexTaskShellEnvConfig(configPath, env); err != nil {
++		t.Fatalf("second EnsureCodexTaskShellEnvConfig failed: %v", err)
++	}
++	data, err = os.ReadFile(configPath)
++	if err != nil {
++		t.Fatalf("failed to read config.toml after update: %v", err)
++	}
++	s = string(data)
++	if strings.Count(s, "shell_environment_policy.set.MULTICA_TOKEN") != 1 {
++		t.Fatalf("expected one MULTICA_TOKEN set line, got:\n%s", s)
++	}
++	if strings.Contains(s, "mat_task_token") || !strings.Contains(s, "mat_next_token") {
++		t.Fatalf("expected token refresh without stale token, got:\n%s", s)
++	}
++}
++
++func TestEnsureCodexTaskShellEnvConfigRequiresManagedBlock(t *testing.T) {
++	t.Parallel()
++
++	configPath := filepath.Join(t.TempDir(), "config.toml")
++	if err := os.WriteFile(configPath, []byte("model = \"gpt-5-codex\"\n"), 0o644); err != nil {
++		t.Fatalf("write config.toml: %v", err)
++	}
++
++	err := EnsureCodexTaskShellEnvConfig(configPath, map[string]string{"MULTICA_TOKEN": "mat_task_token"})
++	if err == nil || !strings.Contains(err.Error(), "multica-managed block not found") {
++		t.Fatalf("EnsureCodexTaskShellEnvConfig error = %v, want managed block error", err)
++	}
++}
++
+ func TestEnsureCodexSandboxConfigDarwinFallsBack(t *testing.T) {
+ 	t.Parallel()
+ 	dir := t.TempDir()
