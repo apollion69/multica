@@ -3742,6 +3742,16 @@ func (d *Daemon) runTask(ctx context.Context, task Task, provider string, slot i
 	// without polluting the system ~/.codex/skills/.
 	if env.CodexHome != "" {
 		agentEnv["CODEX_HOME"] = env.CodexHome
+		agentEnv["HOME"] = env.RootDir
+		if err := ensureCodexHomeAlias(env.RootDir, env.CodexHome); err != nil {
+			return TaskResult{}, err
+		}
+	}
+	if provider == "codex" && env.CodexHome != "" {
+		configPath := filepath.Join(env.CodexHome, "config.toml")
+		if err := execenv.EnsureCodexTaskShellEnvConfig(configPath, agentEnv); err != nil {
+			return TaskResult{}, fmt.Errorf("codex task shell env config: %w", err)
+		}
 	}
 	// Point Cursor at per-task project state when managed MCP is present.
 	// The workdir .cursor/mcp.json carries the managed server list, while
@@ -3807,9 +3817,11 @@ func (d *Daemon) runTask(ctx context.Context, task Task, provider string, slot i
 		extraArgs = append(append([]string{}, profileFixedArgs...), extraArgs...)
 	}
 	var mcpConfig json.RawMessage
+	var toolProfile string
 	if task.Agent != nil {
 		customArgs = task.Agent.CustomArgs
 		mcpConfig = task.Agent.McpConfig
+		toolProfile = task.Agent.CustomEnv["CODEX_TOOL_PROFILE"]
 	}
 	// Two-tier model resolution: an explicit agent.model wins,
 	// then the daemon-wide MULTICA_<PROVIDER>_MODEL env var. If
@@ -3871,6 +3883,7 @@ func (d *Daemon) runTask(ctx context.Context, task Task, provider string, slot i
 		McpConfig:                 mcpConfig,
 		ThinkingLevel:             thinkingLevel,
 		OpenclawMode:              openclawMode,
+		ToolProfile:               toolProfile,
 	}
 	// Some providers do not reliably load the per-task runtime config files we
 	// write into the task workdir:
@@ -4633,6 +4646,35 @@ func composeOpenclawIncludeRoots(addRoot, userValue string) (string, bool) {
 		parts = append(parts, p)
 	}
 	return strings.Join(parts, string(os.PathListSeparator)), true
+}
+
+func ensureCodexHomeAlias(rootDir, codexHome string) error {
+	if rootDir == "" || codexHome == "" {
+		return fmt.Errorf("codex home alias: rootDir and codexHome are required")
+	}
+	alias := filepath.Join(rootDir, ".codex")
+	info, err := os.Lstat(alias)
+	if err == nil {
+		if info.Mode()&os.ModeSymlink == 0 {
+			return fmt.Errorf("codex home alias: %s exists and is not a symlink", alias)
+		}
+		target, err := os.Readlink(alias)
+		if err != nil {
+			return fmt.Errorf("read codex home alias: %w", err)
+		}
+		if target == codexHome {
+			return nil
+		}
+		if err := os.Remove(alias); err != nil {
+			return fmt.Errorf("replace codex home alias: %w", err)
+		}
+	} else if !os.IsNotExist(err) {
+		return fmt.Errorf("stat codex home alias: %w", err)
+	}
+	if err := os.Symlink(codexHome, alias); err != nil {
+		return fmt.Errorf("create codex home alias: %w", err)
+	}
+	return nil
 }
 
 // isBlockedEnvKey returns true if the key must not be overridden by user-

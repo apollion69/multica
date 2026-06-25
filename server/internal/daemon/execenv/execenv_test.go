@@ -1912,6 +1912,10 @@ func TestPrepareCodexHomeSeedsFromShared(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(sharedPluginCache, "superpowers", "SKILL.md"), []byte("Use superpowers."), 0o644); err != nil {
 		t.Fatalf("write shared plugin skill: %v", err)
 	}
+	if err := os.MkdirAll(filepath.Join(sharedHome, "roles"), 0o755); err != nil {
+		t.Fatalf("create roles dir: %v", err)
+	}
+	os.WriteFile(filepath.Join(sharedHome, "roles", "worker.toml"), []byte(`name = "worker"`), 0o644)
 
 	// Point CODEX_HOME to our fake shared home.
 	t.Setenv("CODEX_HOME", sharedHome)
@@ -2002,6 +2006,20 @@ func TestPrepareCodexHomeSeedsFromShared(t *testing.T) {
 	}
 	if string(data) != "Use superpowers." {
 		t.Errorf("plugin cache skill content = %q", data)
+	}
+
+	// roles should be copied so config references work inside task CODEX_HOME.
+	rolePath := filepath.Join(codexHome, "roles", "worker.toml")
+	fi, err := os.Lstat(rolePath)
+	if err != nil {
+		t.Fatalf("roles/worker.toml not found: %v", err)
+	}
+	if fi.Mode()&os.ModeSymlink != 0 {
+		t.Error("roles/worker.toml should be a copy, not symlink")
+	}
+	data, _ = os.ReadFile(rolePath)
+	if string(data) != `name = "worker"` {
+		t.Errorf("roles/worker.toml content = %q", data)
 	}
 }
 
@@ -2452,6 +2470,80 @@ func TestEnsureCodexSandboxConfigDarwinFallsBack(t *testing.T) {
 	}
 	if strings.Contains(string(s), "[sandbox_workspace_write]") {
 		t.Errorf("should not emit workspace-write section on macOS fallback, got:\n%s", s)
+	}
+}
+
+func TestEnsureCodexTaskShellEnvConfigSetsWhitelistedEnv(t *testing.T) {
+	t.Parallel()
+
+	dir := t.TempDir()
+	configPath := filepath.Join(dir, "config.toml")
+	policy := codexSandboxPolicyFor("linux", "0.121.0")
+	if err := ensureCodexSandboxConfig(configPath, policy, "0.121.0", testLogger()); err != nil {
+		t.Fatalf("ensureCodexSandboxConfig failed: %v", err)
+	}
+
+	env := map[string]string{
+		"CODEX_HOME":           "/tmp/task-codex-home",
+		"HOME":                 "/tmp/task-root",
+		"MULTICA_TOKEN":        "mat_task_token",
+		"MULTICA_SERVER_URL":   "http://127.0.0.1:8080",
+		"MULTICA_WORKSPACE_ID": "workspace-1",
+		"MULTICA_TASK_ID":      "task-1",
+		"PATH":                 "/usr/local/bin:/usr/bin",
+		"ANTHROPIC_API_KEY":    "must-not-leak",
+	}
+	if err := EnsureCodexTaskShellEnvConfig(configPath, env); err != nil {
+		t.Fatalf("EnsureCodexTaskShellEnvConfig failed: %v", err)
+	}
+
+	data, err := os.ReadFile(configPath)
+	if err != nil {
+		t.Fatalf("failed to read config.toml: %v", err)
+	}
+	s := string(data)
+	for _, want := range []string{
+		`shell_environment_policy.set.CODEX_HOME = "/tmp/task-codex-home"`,
+		`shell_environment_policy.set.HOME = "/tmp/task-root"`,
+		`shell_environment_policy.set.MULTICA_TOKEN = "mat_task_token"`,
+		`shell_environment_policy.set.MULTICA_SERVER_URL = "http://127.0.0.1:8080"`,
+		`shell_environment_policy.set.MULTICA_WORKSPACE_ID = "workspace-1"`,
+		`shell_environment_policy.set.MULTICA_TASK_ID = "task-1"`,
+		`shell_environment_policy.set.PATH = "/usr/local/bin:/usr/bin"`,
+	} {
+		if !strings.Contains(s, want) {
+			t.Errorf("config.toml missing %q in:\n%s", want, s)
+		}
+	}
+	if strings.Contains(s, "ANTHROPIC_API_KEY") || strings.Contains(s, "must-not-leak") {
+		t.Errorf("config.toml leaked non-whitelisted secret:\n%s", s)
+	}
+}
+
+func TestEnsureCodexTaskShellEnvConfigIsIdempotent(t *testing.T) {
+	t.Parallel()
+
+	dir := t.TempDir()
+	configPath := filepath.Join(dir, "config.toml")
+	policy := codexSandboxPolicyFor("linux", "0.121.0")
+	if err := ensureCodexSandboxConfig(configPath, policy, "0.121.0", testLogger()); err != nil {
+		t.Fatalf("ensureCodexSandboxConfig failed: %v", err)
+	}
+	env := map[string]string{
+		"CODEX_HOME":    "/tmp/task-codex-home",
+		"MULTICA_TOKEN": "mat_task_token",
+	}
+
+	for i := 0; i < 3; i++ {
+		if err := EnsureCodexTaskShellEnvConfig(configPath, env); err != nil {
+			t.Fatalf("pass %d: %v", i, err)
+		}
+	}
+
+	data, _ := os.ReadFile(configPath)
+	s := string(data)
+	if n := strings.Count(s, "shell_environment_policy.set.MULTICA_TOKEN"); n != 1 {
+		t.Fatalf("expected exactly one MULTICA_TOKEN set line, got %d in:\n%s", n, s)
 	}
 }
 

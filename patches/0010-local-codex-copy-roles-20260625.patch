@@ -1,0 +1,149 @@
+diff --git a/server/internal/daemon/execenv/codex_home.go b/server/internal/daemon/execenv/codex_home.go
+index c81fbff73..a88bfa068 100644
+--- a/server/internal/daemon/execenv/codex_home.go
++++ b/server/internal/daemon/execenv/codex_home.go
+@@ -3,6 +3,7 @@ package execenv
+ import (
+ 	"fmt"
+ 	"io"
++	"io/fs"
+ 	"log/slog"
+ 	"os"
+ 	"path/filepath"
+@@ -29,6 +30,12 @@ var codexCopiedFiles = []string{
+ 	"instructions.md",
+ }
+ 
++// Directories copy from shared ~/.codex/ into per-task CODEX_HOME.
++// Copies are isolated and keep task homes self-contained for config references.
++var codexCopiedDirs = []string{
++	"roles",
++}
++
+ // CodexHomeOptions carries optional inputs for prepareCodexHomeWithOpts that
+ // affect the generated per-task config.toml.
+ type CodexHomeOptions struct {
+@@ -89,6 +96,15 @@ func prepareCodexHomeWithOpts(codexHome string, opts CodexHomeOptions, logger *s
+ 		}
+ 	}
+ 
++	// Copy config directories (isolated per task).
++	for _, name := range codexCopiedDirs {
++		src := filepath.Join(sharedHome, name)
++		dst := filepath.Join(codexHome, name)
++		if err := copyDirIfExists(src, dst); err != nil {
++			logger.Warn("execenv: codex-home dir copy failed", "dir", name, "error", err)
++		}
++	}
++
+ 	// Write a daemon-managed sandbox block into config.toml. On macOS we may
+ 	// need to fall back to danger-full-access because of openai/codex#10390;
+ 	// see codex_sandbox.go for the full rationale.
+@@ -173,7 +189,6 @@ func ensureSymlink(src, dst string) error {
+ // codex_sandbox.go's ensureCodexSandboxConfig so they can be updated
+ // idempotently without touching user-managed keys.)
+ 
+-
+ // copyFileIfExists copies src to dst. If src doesn't exist, it's a no-op.
+ // If dst already exists, it's not overwritten.
+ func copyFileIfExists(src, dst string) error {
+@@ -189,6 +204,63 @@ func copyFileIfExists(src, dst string) error {
+ 	return copyFile(src, dst)
+ }
+ 
++// copyDirIfExists copies src directory to dst. If src doesn't exist, it's a no-op.
++// If dst already exists, it's not overwritten.
++func copyDirIfExists(src, dst string) error {
++	info, err := os.Stat(src)
++	if os.IsNotExist(err) {
++		return nil
++	}
++	if err != nil {
++		return fmt.Errorf("stat %s: %w", src, err)
++	}
++	if !info.IsDir() {
++		return nil
++	}
++
++	if _, err := os.Stat(dst); err == nil {
++		return nil
++	} else if !os.IsNotExist(err) {
++		return fmt.Errorf("stat %s: %w", dst, err)
++	}
++
++	return copyDir(src, dst)
++}
++
++// copyDir copies regular files from src to dst without following symlinks.
++func copyDir(src, dst string) error {
++	return filepath.WalkDir(src, func(path string, entry fs.DirEntry, err error) error {
++		if err != nil {
++			return err
++		}
++
++		rel, err := filepath.Rel(src, path)
++		if err != nil {
++			return fmt.Errorf("rel %s from %s: %w", path, src, err)
++		}
++		target := filepath.Join(dst, rel)
++
++		if entry.Type()&os.ModeSymlink != 0 {
++			return nil
++		}
++		if entry.IsDir() {
++			return os.MkdirAll(target, 0o755)
++		}
++
++		info, err := entry.Info()
++		if err != nil {
++			return fmt.Errorf("stat %s: %w", path, err)
++		}
++		if !info.Mode().IsRegular() {
++			return nil
++		}
++		if err := os.MkdirAll(filepath.Dir(target), 0o755); err != nil {
++			return fmt.Errorf("create dir %s: %w", filepath.Dir(target), err)
++		}
++		return copyFile(path, target)
++	})
++}
++
+ // copyFile copies src to dst unconditionally.
+ func copyFile(src, dst string) error {
+ 	in, err := os.Open(src)
+diff --git a/server/internal/daemon/execenv/execenv_test.go b/server/internal/daemon/execenv/execenv_test.go
+index db444f180..9e607234a 100644
+--- a/server/internal/daemon/execenv/execenv_test.go
++++ b/server/internal/daemon/execenv/execenv_test.go
+@@ -801,6 +801,10 @@ func TestPrepareCodexHomeSeedsFromShared(t *testing.T) {
+ 	os.WriteFile(filepath.Join(sharedHome, "config.json"), []byte(`{"model":"o3"}`), 0o644)
+ 	os.WriteFile(filepath.Join(sharedHome, "config.toml"), []byte(`model = "o3"`), 0o644)
+ 	os.WriteFile(filepath.Join(sharedHome, "instructions.md"), []byte("Be helpful."), 0o644)
++	if err := os.MkdirAll(filepath.Join(sharedHome, "roles"), 0o755); err != nil {
++		t.Fatalf("create roles dir: %v", err)
++	}
++	os.WriteFile(filepath.Join(sharedHome, "roles", "worker.toml"), []byte(`name = "worker"`), 0o644)
+ 
+ 	// Point CODEX_HOME to our fake shared home.
+ 	t.Setenv("CODEX_HOME", sharedHome)
+@@ -872,6 +876,20 @@ func TestPrepareCodexHomeSeedsFromShared(t *testing.T) {
+ 	if string(data) != "Be helpful." {
+ 		t.Errorf("instructions.md content = %q", data)
+ 	}
++
++	// roles should be copied so config references work inside task CODEX_HOME.
++	rolePath := filepath.Join(codexHome, "roles", "worker.toml")
++	fi, err = os.Lstat(rolePath)
++	if err != nil {
++		t.Fatalf("roles/worker.toml not found: %v", err)
++	}
++	if fi.Mode()&os.ModeSymlink != 0 {
++		t.Error("roles/worker.toml should be a copy, not symlink")
++	}
++	data, _ = os.ReadFile(rolePath)
++	if string(data) != `name = "worker"` {
++		t.Errorf("roles/worker.toml content = %q", data)
++	}
+ }
+ 
+ func TestPrepareCodexHomeSkipsMissingFiles(t *testing.T) {

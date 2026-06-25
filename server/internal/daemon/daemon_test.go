@@ -898,6 +898,42 @@ func TestWatchTaskCancellation_RunningTaskNotInterrupted(t *testing.T) {
 	}
 }
 
+func TestEnsureCodexHomeAlias(t *testing.T) {
+	t.Parallel()
+
+	root := t.TempDir()
+	codexHome := filepath.Join(root, "codex-home")
+	if err := os.MkdirAll(codexHome, 0o755); err != nil {
+		t.Fatalf("mkdir codex home: %v", err)
+	}
+	if err := ensureCodexHomeAlias(root, codexHome); err != nil {
+		t.Fatalf("ensureCodexHomeAlias failed: %v", err)
+	}
+	if err := ensureCodexHomeAlias(root, codexHome); err != nil {
+		t.Fatalf("ensureCodexHomeAlias should be idempotent: %v", err)
+	}
+	target, err := os.Readlink(filepath.Join(root, ".codex"))
+	if err != nil {
+		t.Fatalf("read .codex alias: %v", err)
+	}
+	if target != codexHome {
+		t.Fatalf(".codex target = %q, want %q", target, codexHome)
+	}
+}
+
+func TestEnsureCodexHomeAliasRejectsDirectory(t *testing.T) {
+	t.Parallel()
+
+	root := t.TempDir()
+	if err := os.Mkdir(filepath.Join(root, ".codex"), 0o755); err != nil {
+		t.Fatalf("mkdir .codex: %v", err)
+	}
+	err := ensureCodexHomeAlias(root, filepath.Join(root, "codex-home"))
+	if err == nil || !strings.Contains(err.Error(), "not a symlink") {
+		t.Fatalf("ensureCodexHomeAlias error = %v, want not-a-symlink error", err)
+	}
+}
+
 func TestMergeUsage(t *testing.T) {
 	t.Parallel()
 

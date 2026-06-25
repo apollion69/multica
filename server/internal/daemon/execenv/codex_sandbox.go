@@ -6,6 +6,7 @@ import (
 	"os"
 	"regexp"
 	"runtime"
+	"sort"
 	"strconv"
 	"strings"
 )
@@ -140,6 +141,97 @@ func renderMulticaManagedBlock(policy codexSandboxPolicy) string {
 	b.WriteString(multicaManagedEndMarker)
 	b.WriteString("\n")
 	return b.String()
+}
+
+var codexShellEnvSetKeys = map[string]struct{}{
+	"CODEX_HOME":                          {},
+	"HOME":                                {},
+	"MULTICA_AGENT_ID":                    {},
+	"MULTICA_AGENT_NAME":                  {},
+	"MULTICA_AUTOPILOT_ID":                {},
+	"MULTICA_AUTOPILOT_RUN_ID":            {},
+	"MULTICA_DAEMON_PORT":                 {},
+	"MULTICA_QUICK_CREATE_ATTACHMENT_IDS": {},
+	"MULTICA_QUICK_CREATE_TASK_ID":        {},
+	"MULTICA_SERVER_URL":                  {},
+	"MULTICA_TASK_ID":                     {},
+	"MULTICA_TASK_SLOT":                   {},
+	"MULTICA_TOKEN":                       {},
+	"MULTICA_WORKSPACE_ID":                {},
+	"PATH":                                {},
+}
+
+// EnsureCodexTaskShellEnvConfig writes daemon-controlled task environment
+// values into Codex's shell environment policy. Codex's default secret filter
+// blocks inherited TOKEN-like variables, so task-scoped MULTICA_TOKEN must be
+// an explicit policy override rather than relying on inherit = "all".
+func EnsureCodexTaskShellEnvConfig(configPath string, env map[string]string) error {
+	if configPath == "" {
+		return fmt.Errorf("codex shell env config: config path is required")
+	}
+	data, err := os.ReadFile(configPath)
+	if err != nil {
+		return fmt.Errorf("read config.toml: %w", err)
+	}
+	updates := codexShellEnvUpdates(env)
+	if len(updates) == 0 {
+		return nil
+	}
+	updated, ok := upsertCodexShellEnvSet(string(data), updates)
+	if !ok {
+		return fmt.Errorf("codex shell env config: multica-managed block not found")
+	}
+	if updated != string(data) {
+		if err := os.WriteFile(configPath, []byte(updated), 0o600); err != nil {
+			return fmt.Errorf("write config.toml: %w", err)
+		}
+		return os.Chmod(configPath, 0o600)
+	}
+	return os.Chmod(configPath, 0o600)
+}
+
+func codexShellEnvUpdates(env map[string]string) []string {
+	if len(env) == 0 {
+		return nil
+	}
+	keys := make([]string, 0, len(codexShellEnvSetKeys))
+	for key := range codexShellEnvSetKeys {
+		if env[key] != "" {
+			keys = append(keys, key)
+		}
+	}
+	sort.Strings(keys)
+	lines := make([]string, 0, len(keys))
+	for _, key := range keys {
+		lines = append(lines, fmt.Sprintf("shell_environment_policy.set.%s = %s", key, strconv.Quote(env[key])))
+	}
+	return lines
+}
+
+func upsertCodexShellEnvSet(content string, updates []string) (string, bool) {
+	match := managedBlockRe.FindStringIndex(content)
+	if match == nil {
+		return "", false
+	}
+	block := content[match[0]:match[1]]
+	lines := strings.Split(block, "\n")
+	out := make([]string, 0, len(lines)+len(updates))
+	inserted := false
+	for _, line := range lines {
+		trimmed := strings.TrimSpace(line)
+		if strings.HasPrefix(trimmed, "shell_environment_policy.set.") {
+			continue
+		}
+		if !inserted && trimmed == multicaManagedEndMarker {
+			out = append(out, updates...)
+			inserted = true
+		}
+		out = append(out, line)
+	}
+	if !inserted {
+		return "", false
+	}
+	return content[:match[0]] + strings.Join(out, "\n") + content[match[1]:], true
 }
 
 // managedBlockRe captures the daemon-owned block (including the surrounding

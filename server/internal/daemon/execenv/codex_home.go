@@ -3,6 +3,7 @@ package execenv
 import (
 	"fmt"
 	"io"
+	"io/fs"
 	"log/slog"
 	"os"
 	"path/filepath"
@@ -30,6 +31,12 @@ var codexCopiedFiles = []string{
 	"config.json",
 	"config.toml",
 	"instructions.md",
+}
+
+// Directories copy from shared ~/.codex/ into per-task CODEX_HOME.
+// Copies are isolated and keep task homes self-contained for config references.
+var codexCopiedDirs = []string{
+	"roles",
 }
 
 // CodexHomeOptions carries optional inputs for prepareCodexHomeWithOpts that
@@ -114,6 +121,15 @@ func prepareCodexHomeWithOpts(codexHome string, opts CodexHomeOptions, logger *s
 
 	if err := exposeSharedCodexPluginCache(codexHome, sharedHome); err != nil {
 		logger.Warn("execenv: codex-home plugin cache exposure failed", "error", err)
+	}
+
+	// Copy config directories (isolated per task).
+	for _, name := range codexCopiedDirs {
+		src := filepath.Join(sharedHome, name)
+		dst := filepath.Join(codexHome, name)
+		if err := copyDirIfExists(src, dst); err != nil {
+			logger.Warn("execenv: codex-home dir copy failed", "dir", name, "error", err)
+		}
 	}
 
 	// Write a daemon-managed sandbox block into config.toml. On macOS we may
@@ -390,6 +406,63 @@ func syncCopiedFile(src, dst string) error {
 		return nil
 	}
 	return copyFile(src, dst)
+}
+
+// copyDirIfExists copies src directory to dst. If src doesn't exist, it's a no-op.
+// If dst already exists, it's not overwritten.
+func copyDirIfExists(src, dst string) error {
+	info, err := os.Stat(src)
+	if os.IsNotExist(err) {
+		return nil
+	}
+	if err != nil {
+		return fmt.Errorf("stat %s: %w", src, err)
+	}
+	if !info.IsDir() {
+		return nil
+	}
+
+	if _, err := os.Stat(dst); err == nil {
+		return nil
+	} else if !os.IsNotExist(err) {
+		return fmt.Errorf("stat %s: %w", dst, err)
+	}
+
+	return copyDir(src, dst)
+}
+
+// copyDir copies regular files from src to dst without following symlinks.
+func copyDir(src, dst string) error {
+	return filepath.WalkDir(src, func(path string, entry fs.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+
+		rel, err := filepath.Rel(src, path)
+		if err != nil {
+			return fmt.Errorf("rel %s from %s: %w", path, src, err)
+		}
+		target := filepath.Join(dst, rel)
+
+		if entry.Type()&os.ModeSymlink != 0 {
+			return nil
+		}
+		if entry.IsDir() {
+			return os.MkdirAll(target, 0o755)
+		}
+
+		info, err := entry.Info()
+		if err != nil {
+			return fmt.Errorf("stat %s: %w", path, err)
+		}
+		if !info.Mode().IsRegular() {
+			return nil
+		}
+		if err := os.MkdirAll(filepath.Dir(target), 0o755); err != nil {
+			return fmt.Errorf("create dir %s: %w", filepath.Dir(target), err)
+		}
+		return copyFile(path, target)
+	})
 }
 
 // copyFile copies src to dst unconditionally.
