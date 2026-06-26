@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"log/slog"
 	"os"
 	"os/exec"
@@ -688,6 +689,7 @@ func (b *codexBackend) Execute(ctx context.Context, prompt string, opts ExecOpti
 		stdin:                stdin,
 		pending:              make(map[int]*pendingRPC),
 		processDone:          make(chan struct{}),
+		toolProfile:          opts.ToolProfile,
 		notificationProtocol: "unknown",
 		onMessage: func(msg Message) {
 			logCodexAgentMessage(b.cfg.Logger, msg)
@@ -1380,6 +1382,7 @@ type codexClient struct {
 	usageMu sync.Mutex
 	usage   TokenUsage // accumulated from turn events
 
+	toolProfile string
 	turnErrorMu sync.Mutex
 	turnError   string // captured from turn/completed status=failed or terminal error notifications
 }
@@ -1630,12 +1633,11 @@ func (c *codexClient) handleServerRequest(raw map[string]json.RawMessage) {
 	var method string
 	_ = json.Unmarshal(raw["method"], &method)
 
-	// Auto-approve all exec/patch requests in daemon mode
 	switch method {
 	case "item/commandExecution/requestApproval", "execCommandApproval":
-		c.respond(id, map[string]any{"decision": "accept"})
+		c.respond(id, map[string]any{"decision": c.codexApprovalDecision(method, raw["params"])})
 	case "item/fileChange/requestApproval", "applyPatchApproval":
-		c.respond(id, map[string]any{"decision": "accept"})
+		c.respond(id, map[string]any{"decision": c.codexApprovalDecision(method, raw["params"])})
 	case "item/permissions/requestApproval":
 		c.respond(id, codexPermissionsApprovalResponse(raw["params"], c.cfg.Logger))
 	case "mcpServer/elicitation/request":
@@ -1687,6 +1689,277 @@ func codexPermissionsApprovalResponse(params json.RawMessage, logger *slog.Logge
 		"permissions": granted,
 		"scope":       "turn",
 	}
+}
+
+func (c *codexClient) codexApprovalDecision(method string, params json.RawMessage) string {
+	profile := normalizeCodexToolProfile(c.toolProfile)
+	if profile == "legacy_auto" || profile == "approved_mutation" {
+		return codexAcceptDecision(method)
+	}
+	if isCodexFileChangeApproval(method) {
+		return codexDeclineDecision(method)
+	}
+	if isCodexReadOnlyCommandApproval(method, params) {
+		return codexAcceptDecision(method)
+	}
+	return codexDeclineDecision(method)
+}
+
+func normalizeCodexToolProfile(profile string) string {
+	switch strings.ToLower(strings.TrimSpace(profile)) {
+	case "", "legacy", "legacy_auto", "auto":
+		return "legacy_auto"
+	case "approved_mutation", "mutation":
+		return "approved_mutation"
+	case "readonly", "readonly_audit", "diagnosis", "mutation_proposal", "verifier":
+		return "readonly_audit"
+	default:
+		return "readonly_audit"
+	}
+}
+
+func isCodexFileChangeApproval(method string) bool {
+	return method == "item/fileChange/requestApproval" || method == "applyPatchApproval"
+}
+
+func codexAcceptDecision(method string) string {
+	if strings.HasPrefix(method, "item/") {
+		return "accept"
+	}
+	return "approved"
+}
+
+func codexDeclineDecision(method string) string {
+	if strings.HasPrefix(method, "item/") {
+		return "decline"
+	}
+	return "denied"
+}
+
+func isCodexReadOnlyCommandApproval(method string, params json.RawMessage) bool {
+	var payload map[string]any
+	if len(params) == 0 || string(params) == "null" {
+		return false
+	}
+	if err := json.Unmarshal(params, &payload); err != nil {
+		return false
+	}
+	if actions, ok := payload["commandActions"].([]any); ok && len(actions) > 0 {
+		return codexActionsReadOnly(actions) && codexCommandCompatibleWithReadOnlyActions(payload)
+	}
+	if parsed, ok := payload["parsedCmd"].([]any); ok && len(parsed) > 0 {
+		return codexActionsReadOnly(parsed) && codexCommandCompatibleWithReadOnlyActions(payload)
+	}
+	if method == "execCommandApproval" {
+		if argv, ok := payload["command"].([]any); ok && len(argv) > 0 {
+			return codexArgvReadOnly(argv)
+		}
+	}
+	if command, ok := payload["command"].(string); ok {
+		return codexCommandStringReadOnly(command)
+	}
+	return false
+}
+
+func codexCommandCompatibleWithReadOnlyActions(payload map[string]any) bool {
+	raw, ok := payload["command"]
+	if !ok {
+		return true
+	}
+	switch command := raw.(type) {
+	case string:
+		return codexCommandStringCompatibleWithReadOnlyActions(command)
+	case []any:
+		fields := make([]string, 0, len(command))
+		for _, arg := range command {
+			text, ok := arg.(string)
+			if !ok || text == "" {
+				return false
+			}
+			fields = append(fields, text)
+		}
+		return codexCommandFieldsCompatibleWithReadOnlyActions(fields)
+	default:
+		return false
+	}
+}
+
+func codexCommandStringCompatibleWithReadOnlyActions(command string) bool {
+	fields := strings.Fields(command)
+	if len(fields) == 0 {
+		return false
+	}
+	if strings.ContainsAny(command, ">|;&<`\n\r") || strings.Contains(command, "$(") {
+		return false
+	}
+	return codexCommandFieldsCompatibleWithReadOnlyActions(fields)
+}
+
+func codexCommandFieldsCompatibleWithReadOnlyActions(fields []string) bool {
+	if len(fields) == 0 {
+		return false
+	}
+	switch filepath.Base(fields[0]) {
+	case "git":
+		return codexGitReadOnly(fields[1:])
+	case "find":
+		return codexFindReadOnly(fields[1:])
+	case "sed":
+		return codexSedReadOnly(fields[1:])
+	default:
+		return codexCommandHeadReadOnly(fields[0])
+	}
+}
+
+func codexActionsReadOnly(actions []any) bool {
+	for _, raw := range actions {
+		action, ok := raw.(map[string]any)
+		if !ok {
+			return false
+		}
+		switch action["type"] {
+		case "read", "list_files", "search":
+		default:
+			return false
+		}
+		if command, ok := action["command"].(string); ok && command != "" {
+			if !codexCommandStringCompatibleWithReadOnlyActions(command) {
+				return false
+			}
+		}
+	}
+	return true
+}
+
+func codexFindReadOnly(args []string) bool {
+	for _, arg := range args {
+		switch arg {
+		case "-delete", "-exec", "-execdir", "-ok", "-okdir", "-fprint", "-fprint0", "-fprintf", "-fls":
+			return false
+		}
+	}
+	return true
+}
+
+func codexSedReadOnly(args []string) bool {
+	for _, arg := range args {
+		if arg == "-i" || strings.HasPrefix(arg, "-i") || arg == "--in-place" || strings.HasPrefix(arg, "--in-place=") {
+			return false
+		}
+	}
+	return true
+}
+
+func codexArgvReadOnly(argv []any) bool {
+	fields := make([]string, 0, len(argv))
+	for _, raw := range argv {
+		arg, ok := raw.(string)
+		if !ok || arg == "" {
+			return false
+		}
+		fields = append(fields, arg)
+	}
+	return codexCommandFieldsReadOnly(fields)
+}
+
+func codexCommandStringReadOnly(command string) bool {
+	fields := strings.Fields(command)
+	if len(fields) == 0 {
+		return false
+	}
+	if strings.ContainsAny(command, ">|;&<`\n\r") || strings.Contains(command, "$(") {
+		return false
+	}
+	return codexCommandFieldsReadOnly(fields)
+}
+
+func codexCommandHeadReadOnly(head string) bool {
+	switch filepath.Base(head) {
+	case "cat", "find", "grep", "head", "ls", "pwd", "rg", "stat", "tail", "test", "wc":
+		return true
+	default:
+		return false
+	}
+}
+
+func codexCommandFieldsReadOnly(fields []string) bool {
+	if len(fields) == 0 {
+		return false
+	}
+	switch filepath.Base(fields[0]) {
+	case "cat", "grep", "head", "ls", "pwd", "rg", "stat", "tail", "test", "wc":
+		return true
+	case "git":
+		return codexGitReadOnly(fields[1:])
+	default:
+		return false
+	}
+}
+
+func codexGitReadOnly(args []string) bool {
+	i := 0
+	for i < len(args) {
+		switch args[i] {
+		case "-C", "--git-dir", "--work-tree":
+			i += 2
+		default:
+			if strings.HasPrefix(args[i], "-C") && len(args[i]) > len("-C") {
+				i++
+				continue
+			}
+			if strings.HasPrefix(args[i], "-") {
+				return false
+			}
+			goto subcommand
+		}
+	}
+	return false
+
+subcommand:
+	subcommand := args[i]
+	rest := args[i+1:]
+	switch subcommand {
+	case "status", "show", "log", "rev-parse", "ls-files", "ls-tree", "cat-file", "grep", "describe":
+		return !codexGitHasUnsafeReadFlag(rest)
+	case "diff":
+		return !codexGitHasUnsafeReadFlag(rest)
+	case "branch":
+		return codexGitBranchReadOnly(rest)
+	case "remote":
+		return len(rest) == 0 || (len(rest) == 1 && rest[0] == "-v")
+	default:
+		return false
+	}
+}
+
+func codexGitHasUnsafeReadFlag(args []string) bool {
+	for _, arg := range args {
+		switch {
+		case arg == "--ext-diff" || arg == "--external-diff":
+			return true
+		case arg == "--output" || strings.HasPrefix(arg, "--output="):
+			return true
+		}
+	}
+	return false
+}
+
+func codexGitBranchReadOnly(args []string) bool {
+	if len(args) == 0 {
+		return true
+	}
+	for _, arg := range args {
+		switch arg {
+		case "-a", "-r", "-v", "-vv", "--all", "--remotes", "--verbose", "--show-current", "--list", "--merged", "--no-merged":
+			continue
+		default:
+			if strings.HasPrefix(arg, "--format=") || strings.HasPrefix(arg, "--contains=") || strings.HasPrefix(arg, "--points-at=") {
+				continue
+			}
+			return false
+		}
+	}
+	return true
 }
 
 func (c *codexClient) handleNotification(raw map[string]json.RawMessage) {

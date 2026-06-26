@@ -2014,7 +2014,7 @@ func TestPrepareCodexHomeSeedsFromShared(t *testing.T) {
 
 	// roles should be copied so config references work inside task CODEX_HOME.
 	rolePath := filepath.Join(codexHome, "roles", "worker.toml")
-	fi, err := os.Lstat(rolePath)
+	fi, err = os.Lstat(rolePath)
 	if err != nil {
 		t.Fatalf("roles/worker.toml not found: %v", err)
 	}

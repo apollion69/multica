@@ -2650,3 +2650,160 @@ func TestCodexStderrLogWriterKeepsRouterErrors(t *testing.T) {
 		t.Fatalf("expected router error to remain logged, got %q", got)
 	}
 }
+
+func TestCodexHandleServerRequestReadonlyAllowsReadOnlyExec(t *testing.T) {
+	t.Parallel()
+
+	c, fs, _ := newTestCodexClient(t)
+	c.toolProfile = "readonly_audit"
+
+	c.handleLine(`{"jsonrpc":"2.0","id":12,"method":"item/commandExecution/requestApproval","params":{"command":"rg TODO .","commandActions":[{"type":"search","command":"rg","name":"rg","path":"/work"}],"itemId":"item-1","threadId":"thr","turnId":"turn","startedAtMs":1}}`)
+
+	lines := fs.Lines()
+	if len(lines) != 1 {
+		t.Fatalf("expected 1 response, got %d", len(lines))
+	}
+
+	var resp map[string]any
+	if err := json.Unmarshal([]byte(lines[0]), &resp); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	result := resp["result"].(map[string]any)
+	if result["decision"] != "accept" {
+		t.Fatalf("expected decision=accept, got %v", result["decision"])
+	}
+}
+
+func TestCodexHandleServerRequestReadonlyDeclinesMutationExec(t *testing.T) {
+	t.Parallel()
+
+	c, fs, _ := newTestCodexClient(t)
+	c.toolProfile = "readonly_audit"
+
+	c.handleLine(`{"jsonrpc":"2.0","id":13,"method":"item/commandExecution/requestApproval","params":{"command":"rm -rf build","commandActions":[{"type":"unknown","command":"rm"}],"itemId":"item-1","threadId":"thr","turnId":"turn","startedAtMs":1}}`)
+
+	lines := fs.Lines()
+	if len(lines) != 1 {
+		t.Fatalf("expected 1 response, got %d", len(lines))
+	}
+
+	var resp map[string]any
+	if err := json.Unmarshal([]byte(lines[0]), &resp); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	result := resp["result"].(map[string]any)
+	if result["decision"] != "decline" {
+		t.Fatalf("expected decision=decline, got %v", result["decision"])
+	}
+}
+
+func TestCodexHandleServerRequestReadonlyDeclinesFileChange(t *testing.T) {
+	t.Parallel()
+
+	c, fs, _ := newTestCodexClient(t)
+	c.toolProfile = "readonly_audit"
+
+	c.handleLine(`{"jsonrpc":"2.0","id":14,"method":"applyPatchApproval","params":{}}`)
+
+	lines := fs.Lines()
+	if len(lines) != 1 {
+		t.Fatalf("expected 1 response, got %d", len(lines))
+	}
+
+	var resp map[string]any
+	if err := json.Unmarshal([]byte(lines[0]), &resp); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	result := resp["result"].(map[string]any)
+	if result["decision"] != "denied" {
+		t.Fatalf("expected decision=denied, got %v", result["decision"])
+	}
+}
+
+func TestCodexReadonlyCommandFallbackAllowsSafeGitStatus(t *testing.T) {
+	t.Parallel()
+
+	c := &codexClient{toolProfile: "readonly_audit"}
+	params := json.RawMessage(`{"command":"git -C /work status --short"}`)
+
+	if got := c.codexApprovalDecision("execCommandApproval", params); got != "approved" {
+		t.Fatalf("expected approved, got %v", got)
+	}
+}
+
+func TestCodexReadonlyCommandFallbackDeclinesMutatingCommands(t *testing.T) {
+	t.Parallel()
+
+	c := &codexClient{toolProfile: "readonly_audit"}
+	cases := []struct {
+		name   string
+		method string
+		params json.RawMessage
+		want   string
+	}{
+		{
+			name:   "git clean string",
+			method: "execCommandApproval",
+			params: json.RawMessage(`{"command":"git clean -fd"}`),
+			want:   "denied",
+		},
+		{
+			name:   "find delete argv",
+			method: "execCommandApproval",
+			params: json.RawMessage(`{"command":["find",".","-delete"]}`),
+			want:   "denied",
+		},
+		{
+			name:   "sed inplace string",
+			method: "item/commandExecution/requestApproval",
+			params: json.RawMessage(`{"command":"sed -i s/a/b/ file"}`),
+			want:   "decline",
+		},
+		{
+			name:   "forged readonly action with mutating command",
+			method: "item/commandExecution/requestApproval",
+			params: json.RawMessage(`{"command":"rm -rf build","commandActions":[{"type":"search","command":"rm"}]}`),
+			want:   "decline",
+		},
+		{
+			name:   "forged readonly action mismatches top-level command",
+			method: "item/commandExecution/requestApproval",
+			params: json.RawMessage(`{"command":"rm -rf build","commandActions":[{"type":"search","command":"rg"}]}`),
+			want:   "decline",
+		},
+	}
+
+	for _, tc := range cases {
+		tc := tc
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			if got := c.codexApprovalDecision(tc.method, tc.params); got != tc.want {
+				t.Fatalf("expected %s, got %v", tc.want, got)
+			}
+		})
+	}
+}
+
+func TestCodexHandleServerRequestApprovedMutationAllowsFileChange(t *testing.T) {
+	t.Parallel()
+
+	c, fs, _ := newTestCodexClient(t)
+	c.toolProfile = "approved_mutation"
+
+	c.handleLine(`{"jsonrpc":"2.0","id":15,"method":"applyPatchApproval","params":{}}`)
+
+	lines := fs.Lines()
+	if len(lines) != 1 {
+		t.Fatalf("expected 1 response, got %d", len(lines))
+	}
+
+	var resp map[string]any
+	if err := json.Unmarshal([]byte(lines[0]), &resp); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	result := resp["result"].(map[string]any)
+	if result["decision"] != "approved" {
+		t.Fatalf("expected decision=approved, got %v", result["decision"])
+	}
+}
