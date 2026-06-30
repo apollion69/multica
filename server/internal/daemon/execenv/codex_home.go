@@ -9,10 +9,12 @@ import (
 )
 
 // Directories to symlink from the shared ~/.codex/ into the per-task CODEX_HOME.
-// The shared directory is created if it doesn't exist, ensuring Codex session
-// logs are always written to the global home where users can find them.
+// Shared directories are created if they don't exist. Sessions keep Codex logs
+// discoverable in the global home; roles keep config.toml agent role references
+// valid inside isolated task homes.
 var codexSymlinkedDirs = []string{
 	"sessions",
+	"roles",
 }
 
 // Files to symlink from the shared ~/.codex/ into the per-task CODEX_HOME.

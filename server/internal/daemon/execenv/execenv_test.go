@@ -1927,6 +1927,13 @@ func TestPrepareCodexHomeSeedsFromShared(t *testing.T) {
 	os.WriteFile(filepath.Join(sharedHome, "config.json"), []byte(`{"model":"o3"}`), 0o644)
 	os.WriteFile(filepath.Join(sharedHome, "config.toml"), []byte(`model = "o3"`), 0o644)
 	os.WriteFile(filepath.Join(sharedHome, "instructions.md"), []byte("Be helpful."), 0o644)
+	sharedRoles := filepath.Join(sharedHome, "roles")
+	if err := os.MkdirAll(sharedRoles, 0o755); err != nil {
+		t.Fatalf("create shared roles: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(sharedRoles, "monitor.toml"), []byte(`sandbox_mode = "read-only"`), 0o644); err != nil {
+		t.Fatalf("write shared role: %v", err)
+	}
 	sharedPluginCache := filepath.Join(sharedHome, "plugins", "cache")
 	if err := os.MkdirAll(filepath.Join(sharedPluginCache, "superpowers"), 0o755); err != nil {
 		t.Fatalf("create shared plugin cache: %v", err)
@@ -1964,6 +1971,31 @@ func TestPrepareCodexHomeSeedsFromShared(t *testing.T) {
 		}
 	}
 
+	// roles should be symlink to shared roles dir so copied config.toml
+	// references like roles/monitor.toml resolve inside per-task CODEX_HOME.
+	rolesPath := filepath.Join(codexHome, "roles")
+	fi, err = os.Lstat(rolesPath)
+	if err != nil {
+		t.Fatalf("roles not found: %v", err)
+	}
+	rolesIsLink := fi.Mode()&os.ModeSymlink != 0
+	if !rolesIsLink && runtime.GOOS != "windows" {
+		t.Error("roles should be symlink")
+	}
+	if rolesIsLink {
+		target, _ := os.Readlink(rolesPath)
+		if target != filepath.Join(sharedHome, "roles") {
+			t.Errorf("roles symlink target = %q, want %q", target, filepath.Join(sharedHome, "roles"))
+		}
+	}
+	data, err := os.ReadFile(filepath.Join(rolesPath, "monitor.toml"))
+	if err != nil {
+		t.Fatalf("roles symlink target should expose monitor.toml: %v", err)
+	}
+	if string(data) != `sandbox_mode = "read-only"` {
+		t.Errorf("roles monitor content = %q", data)
+	}
+
 	// auth.json should be a symlink.
 	authPath := filepath.Join(codexHome, "auth.json")
 	fi, err = os.Lstat(authPath)
@@ -1981,7 +2013,7 @@ func TestPrepareCodexHomeSeedsFromShared(t *testing.T) {
 		}
 	}
 	// Verify content is accessible through symlink.
-	data, _ := os.ReadFile(authPath)
+	data, _ = os.ReadFile(authPath)
 	if string(data) != `{"token":"secret"}` {
 		t.Errorf("auth.json content = %q", data)
 	}
@@ -2090,7 +2122,7 @@ func TestPrepareCodexHomeSkipsMissingFiles(t *testing.T) {
 		t.Fatalf("prepareCodexHome failed: %v", err)
 	}
 
-	// Directory should contain sessions symlink + auto-generated config.toml.
+	// Directory should contain shared dir symlinks + auto-generated config.toml.
 	entries, err := os.ReadDir(codexHome)
 	if err != nil {
 		t.Fatalf("failed to read codex-home: %v", err)
@@ -2102,6 +2134,9 @@ func TestPrepareCodexHomeSkipsMissingFiles(t *testing.T) {
 	if !entryNames["sessions"] {
 		t.Error("expected sessions symlink")
 	}
+	if !entryNames["roles"] {
+		t.Error("expected roles symlink")
+	}
 	if !entryNames["config.toml"] {
 		t.Error("expected config.toml (auto-generated for network access)")
 	}
@@ -2109,7 +2144,7 @@ func TestPrepareCodexHomeSkipsMissingFiles(t *testing.T) {
 		t.Error("expected plugins directory for plugin cache exposure")
 	}
 	for name := range entryNames {
-		if name != "sessions" && name != "config.toml" && name != "plugins" {
+		if name != "sessions" && name != "roles" && name != "config.toml" && name != "plugins" {
 			t.Errorf("unexpected entry: %s", name)
 		}
 	}
@@ -2121,6 +2156,14 @@ func TestPrepareCodexHomeSkipsMissingFiles(t *testing.T) {
 	}
 	if fi.Mode()&os.ModeSymlink == 0 && runtime.GOOS != "windows" {
 		t.Error("sessions should be a symlink")
+	}
+	rolesPath := filepath.Join(codexHome, "roles")
+	fi, err = os.Lstat(rolesPath)
+	if err != nil {
+		t.Fatalf("roles not found: %v", err)
+	}
+	if fi.Mode()&os.ModeSymlink == 0 && runtime.GOOS != "windows" {
+		t.Error("roles should be a symlink")
 	}
 	if _, err := os.Stat(filepath.Join(codexHome, "plugins", "cache")); err != nil {
 		t.Fatalf("missing shared plugin cache exposure should still be tolerated and created: %v", err)
