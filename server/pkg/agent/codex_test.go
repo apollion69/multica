@@ -2715,7 +2715,7 @@ func TestCodexHandleServerRequestReadonlyDeclinesFileChange(t *testing.T) {
 		t.Fatalf("unmarshal: %v", err)
 	}
 	result := resp["result"].(map[string]any)
-	if result["decision"] != "denied" {
+	if result["decision"] != "decline" {
 		t.Fatalf("expected decision=denied, got %v", result["decision"])
 	}
 }
@@ -2726,7 +2726,7 @@ func TestCodexReadonlyCommandFallbackAllowsSafeGitStatus(t *testing.T) {
 	c := &codexClient{toolProfile: "readonly_audit"}
 	params := json.RawMessage(`{"command":"git -C /work status --short"}`)
 
-	if got := c.codexApprovalDecision("execCommandApproval", params); got != "approved" {
+	if got := c.codexApprovalDecision("execCommandApproval", params); got != "accept" {
 		t.Fatalf("expected approved, got %v", got)
 	}
 }
@@ -2745,13 +2745,13 @@ func TestCodexReadonlyCommandFallbackDeclinesMutatingCommands(t *testing.T) {
 			name:   "git clean string",
 			method: "execCommandApproval",
 			params: json.RawMessage(`{"command":"git clean -fd"}`),
-			want:   "denied",
+			want:   "decline",
 		},
 		{
 			name:   "find delete argv",
 			method: "execCommandApproval",
 			params: json.RawMessage(`{"command":["find",".","-delete"]}`),
-			want:   "denied",
+			want:   "decline",
 		},
 		{
 			name:   "sed inplace string",
@@ -2803,7 +2803,7 @@ func TestCodexHandleServerRequestApprovedMutationAllowsFileChange(t *testing.T) 
 		t.Fatalf("unmarshal: %v", err)
 	}
 	result := resp["result"].(map[string]any)
-	if result["decision"] != "approved" {
+	if result["decision"] != "accept" {
 		t.Fatalf("expected decision=approved, got %v", result["decision"])
 	}
 }

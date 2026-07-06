@@ -1723,17 +1723,16 @@ func isCodexFileChangeApproval(method string) bool {
 }
 
 func codexAcceptDecision(method string) string {
-	if strings.HasPrefix(method, "item/") {
-		return "accept"
-	}
-	return "approved"
+	// Modern Codex app-server accepts "accept"/"decline" for both the item/*
+	// and the legacy method names (upstream v0.3.38 responds "accept"
+	// unconditionally); the old "approved"/"denied" wording is retired.
+	_ = method
+	return "accept"
 }
 
 func codexDeclineDecision(method string) string {
-	if strings.HasPrefix(method, "item/") {
-		return "decline"
-	}
-	return "denied"
+	_ = method
+	return "decline"
 }
 
 func isCodexReadOnlyCommandApproval(method string, params json.RawMessage) bool {
