@@ -1077,6 +1077,7 @@ func NewRouterWithOptions(pool *pgxpool.Pool, hub *realtime.Hub, bus *events.Bus
 
 			// Assignee frequency
 			r.Get("/api/assignee-frequency", h.GetAssigneeFrequency)
+			r.Get("/api/task-runs/terminal-metadata", h.ListTerminalTaskMetadata)
 
 			// Issues
 			r.Route("/api/issues", func(r chi.Router) {
