@@ -1351,6 +1351,45 @@ SELECT * FROM agent_task_queue
 WHERE issue_id = $1
 ORDER BY created_at DESC;
 
+-- name: GetTerminalTaskMetadataWatermark :one
+SELECT q.completed_at, q.id
+FROM agent_task_queue AS q
+JOIN issue AS i ON i.id = q.issue_id
+WHERE i.workspace_id = @workspace_id
+  AND q.status IN ('completed', 'failed', 'cancelled')
+  AND q.completed_at IS NOT NULL
+ORDER BY q.completed_at DESC, q.id DESC
+LIMIT 1;
+
+-- name: ListTerminalTaskMetadata :many
+SELECT
+  q.attempt,
+  q.completed_at,
+  q.created_at,
+  q.dispatched_at,
+  q.is_leader_task,
+  q.issue_id,
+  CASE
+    WHEN q.chat_session_id IS NOT NULL THEN 'chat'
+    WHEN q.autopilot_run_id IS NOT NULL THEN 'autopilot'
+    WHEN q.trigger_comment_id IS NOT NULL THEN 'comment'
+    ELSE 'direct'
+  END::text AS kind,
+  q.max_attempts,
+  q.parent_task_id,
+  q.id AS source_id,
+  q.started_at,
+  q.status
+FROM agent_task_queue AS q
+JOIN issue AS i ON i.id = q.issue_id
+WHERE i.workspace_id = @workspace_id
+  AND q.status IN ('completed', 'failed', 'cancelled')
+  AND q.completed_at IS NOT NULL
+  AND (q.completed_at, q.id) > (@after_completed_at::timestamptz, @after_id::uuid)
+  AND (q.completed_at, q.id) <= (@watermark_completed_at::timestamptz, @watermark_id::uuid)
+ORDER BY q.completed_at ASC, q.id ASC
+LIMIT @row_limit;
+
 -- name: UpdateAgentStatus :one
 UPDATE agent SET status = $2, updated_at = now()
 WHERE id = $1

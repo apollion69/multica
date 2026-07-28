@@ -320,6 +320,13 @@ var issueRunsCmd = &cobra.Command{
 	RunE:  runIssueRuns,
 }
 
+var issueTerminalTasksCmd = &cobra.Command{
+	Use:   "terminal-tasks",
+	Short: "List body-free terminal task metadata",
+	Args:  cobra.NoArgs,
+	RunE:  runIssueTerminalTasks,
+}
+
 var issueRunMessagesCmd = &cobra.Command{
 	Use:   "run-messages <task-id>",
 	Short: "List messages for an execution",
@@ -417,6 +424,7 @@ func init() {
 	issueCmd.AddCommand(issueCommentCmd)
 	issueCmd.AddCommand(issueSubscriberCmd)
 	issueCmd.AddCommand(issueRunsCmd)
+	issueCmd.AddCommand(issueTerminalTasksCmd)
 	issueCmd.AddCommand(issueRunMessagesCmd)
 	issueCmd.AddCommand(issueUsageCmd)
 	issueCmd.AddCommand(issueRerunCmd)
@@ -521,6 +529,11 @@ func init() {
 	// issue runs
 	issueRunsCmd.Flags().String("output", "table", "Output format: table or json")
 	issueRunsCmd.Flags().Bool("full-id", false, "Show full task UUIDs in table output")
+	issueTerminalTasksCmd.Flags().Int("limit", 100, "Maximum records to return (1-100)")
+	issueTerminalTasksCmd.Flags().String("after-completed-at", "", "Cursor completion timestamp (RFC3339Nano; requires --after-id and both watermark flags)")
+	issueTerminalTasksCmd.Flags().String("after-id", "", "Cursor task UUID (requires --after-completed-at and both watermark flags)")
+	issueTerminalTasksCmd.Flags().String("watermark-completed-at", "", "Fixed scan watermark completion timestamp (RFC3339Nano; requires --watermark-id)")
+	issueTerminalTasksCmd.Flags().String("watermark-id", "", "Fixed scan watermark task UUID (requires --watermark-completed-at)")
 
 	// issue usage
 	issueUsageCmd.Flags().String("output", "table", "Output format: table or json")
@@ -2141,6 +2154,37 @@ func runIssueUsage(cmd *cobra.Command, args []string) error {
 	}}
 	cli.PrintTable(os.Stdout, headers, rows)
 	return nil
+}
+
+func runIssueTerminalTasks(cmd *cobra.Command, _ []string) error {
+	client, err := newAPIClient(cmd)
+	if err != nil {
+		return err
+	}
+
+	query := url.Values{}
+	limit, _ := cmd.Flags().GetInt("limit")
+	query.Set("limit", strconv.Itoa(limit))
+	for flag, param := range map[string]string{
+		"after-completed-at":     "after_completed_at",
+		"after-id":               "after_id",
+		"watermark-completed-at": "watermark_completed_at",
+		"watermark-id":           "watermark_id",
+	} {
+		value, _ := cmd.Flags().GetString(flag)
+		if value != "" {
+			query.Set(param, value)
+		}
+	}
+
+	ctx, cancel := cli.APIContext(context.Background())
+	defer cancel()
+
+	var page map[string]any
+	if err := client.GetJSON(ctx, "/api/task-runs/terminal-metadata?"+query.Encode(), &page); err != nil {
+		return fmt.Errorf("list terminal tasks: %w", err)
+	}
+	return cli.PrintJSON(os.Stdout, page)
 }
 
 func runIssueRunMessages(cmd *cobra.Command, args []string) error {
