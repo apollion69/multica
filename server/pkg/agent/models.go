@@ -379,6 +379,11 @@ func codexStaticModels() []Model {
 		{ID: "gpt-5.4-mini", Label: "GPT-5.4-Mini", Provider: "openai", Thinking: standardThinking("medium", false, false)},
 		{ID: "gpt-5.3-codex", Label: "GPT-5.3-Codex", Provider: "openai", Thinking: standardThinking("medium", false, false)},
 		{ID: "gpt-5.2", Label: "GPT-5.2", Provider: "openai", Thinking: gpt52Thinking()},
+		{ID: "gpt-5.5-mini", Label: "GPT-5.5 mini", Provider: "openai"},
+		{ID: "gpt-5.3-codex-spark", Label: "GPT-5.3 Codex Spark", Provider: "openai"},
+		{ID: "gpt-5", Label: "GPT-5", Provider: "openai"},
+		{ID: "o3", Label: "o3", Provider: "openai"},
+		{ID: "o3-mini", Label: "o3-mini", Provider: "openai"},
 	}
 }
 
@@ -424,6 +429,7 @@ func copilotStaticModels() []Model {
 		{ID: "gpt-5.4", Label: "GPT-5.4", Provider: "openai"},
 		{ID: "gpt-5.4-mini", Label: "GPT-5.4 mini", Provider: "openai"},
 		{ID: "gpt-5.3-codex", Label: "GPT-5.3-Codex", Provider: "openai"},
+		{ID: "gpt-5.3-codex-spark", Label: "GPT-5.3-Codex-Spark", Provider: "openai"},
 		{ID: "gpt-5.2-codex", Label: "GPT-5.2-Codex", Provider: "openai"},
 		{ID: "gpt-5.2", Label: "GPT-5.2", Provider: "openai"},
 		{ID: "gpt-5-mini", Label: "GPT-5 mini", Provider: "openai"},

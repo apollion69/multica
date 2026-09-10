@@ -147,6 +147,12 @@ func extractIssueFields(v any) (handler.IssueResponse, bool) {
 // addSubscriber adds a user as an issue subscriber and publishes a
 // subscriber:added event for real-time frontend sync.
 func addSubscriber(bus *events.Bus, queries *db.Queries, workspaceID, issueID, userType, userID, reason string) {
+	// issue_subscriber.user_type is constrained to member/agent. Squad and other
+	// assignee kinds are dispatched via their own path, not individual subscriber
+	// rows -- skip them here to avoid a check-constraint violation and noisy log (D-544).
+	if userType != "member" && userType != "agent" {
+		return
+	}
 	err := queries.AddIssueSubscriber(context.Background(), db.AddIssueSubscriberParams{
 		IssueID:  parseUUID(issueID),
 		UserType: userType,

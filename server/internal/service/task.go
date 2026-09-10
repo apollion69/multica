@@ -3157,8 +3157,9 @@ var retryableReasons = map[string]bool{
 // final attempt instead of firing back-to-back. Every other retryable reason
 // keeps the task's generic max_attempts ceiling and retries immediately.
 const (
-	providerNetworkMaxAttempts    = 3
-	providerNetworkFinalRetryWait = 5 * time.Second
+	providerNetworkMaxAttempts       = 3
+	providerNetworkFinalRetryWait    = 5 * time.Second
+	codexSemanticInactivityRetryWait = 20 * time.Second
 )
 
 // retryAttemptCeiling reports how many attempts the auto-retry path allows for
@@ -3191,6 +3192,9 @@ func retryDelayForAttempt(reason string, failedAttempt int32) time.Duration {
 	if reason == string(taskfailure.ReasonAgentProviderNetwork) &&
 		failedAttempt >= providerNetworkMaxAttempts-1 {
 		return providerNetworkFinalRetryWait
+	}
+	if reason == "codex_semantic_inactivity" {
+		return codexSemanticInactivityRetryWait
 	}
 	return 0
 }

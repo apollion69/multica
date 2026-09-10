@@ -2646,6 +2646,15 @@ func TestEnsureCodexSandboxConfigCreatesDefaultLinux(t *testing.T) {
 	if !strings.Contains(s, "sandbox_workspace_write.network_access = true") {
 		t.Errorf("missing dotted-key network_access = true, got:\n%s", s)
 	}
+	if !strings.Contains(s, `shell_environment_policy.inherit = "all"`) {
+		t.Errorf("missing shell env inheritance policy, got:\n%s", s)
+	}
+	if !strings.Contains(s, "shell_environment_policy.ignore_default_excludes = false") {
+		t.Errorf("missing default secret exclude guard, got:\n%s", s)
+	}
+	if !strings.Contains(s, `shell_environment_policy.include_only = ["ANSIBLE_MCP_BEARER_TOKEN", "UACP_AGENT_MAIL_BEARER_TOKEN"]`) {
+		t.Errorf("missing managed MCP bearer allowlist, got:\n%s", s)
+	}
 }
 
 func TestEnsureCodexSandboxConfigDarwinFallsBack(t *testing.T) {
@@ -2661,6 +2670,15 @@ func TestEnsureCodexSandboxConfigDarwinFallsBack(t *testing.T) {
 	s, _ := os.ReadFile(configPath)
 	if !strings.Contains(string(s), `sandbox_mode = "danger-full-access"`) {
 		t.Errorf("expected danger-full-access fallback on macOS, got:\n%s", s)
+	}
+	if !strings.Contains(string(s), `shell_environment_policy.inherit = "all"`) {
+		t.Errorf("missing shell env inheritance policy in fallback config, got:\n%s", s)
+	}
+	if !strings.Contains(string(s), "shell_environment_policy.ignore_default_excludes = false") {
+		t.Errorf("missing default secret exclude guard in fallback config, got:\n%s", s)
+	}
+	if !strings.Contains(string(s), `shell_environment_policy.include_only = ["ANSIBLE_MCP_BEARER_TOKEN", "UACP_AGENT_MAIL_BEARER_TOKEN"]`) {
+		t.Errorf("missing managed MCP bearer allowlist in fallback config, got:\n%s", s)
 	}
 	if strings.Contains(string(s), "[sandbox_workspace_write]") {
 		t.Errorf("should not emit workspace-write section on macOS fallback, got:\n%s", s)

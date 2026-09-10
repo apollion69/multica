@@ -19,7 +19,6 @@ type mention struct {
 	ID   string // user_id, agent_id, issue_id, or "all"
 }
 
-
 // statusLabels maps DB status values to human-readable labels for notifications.
 var statusLabels = map[string]string{
 	"backlog":     "Backlog",
@@ -67,6 +66,10 @@ func parseMentions(content string) []mention {
 	return result
 }
 
+func shouldNotifyStatusChangeSubscribers(e events.Event) bool {
+	return e.ActorType == "member"
+}
+
 // parentBubbleNotifTypes is the allowlist of inbox notification types that
 // bubble up from a sub-issue to subscribers of its parent. Other event types
 // only notify subscribers of the sub-issue itself, to keep parent watchers'
@@ -78,19 +81,19 @@ var parentBubbleNotifTypes = map[string]bool{
 // notifTypeToGroup maps each InboxItemType to a user-configurable preference
 // group. Types not in this map are always delivered (not configurable).
 var notifTypeToGroup = map[string]string{
-	"issue_assigned":  "assignments",
-	"unassigned":      "assignments",
-	"assignee_changed": "assignments",
-	"status_changed":  "status_changes",
-	"new_comment":     "comments",
-	"mentioned":       "comments",
-	"priority_changed": "updates",
+	"issue_assigned":     "assignments",
+	"unassigned":         "assignments",
+	"assignee_changed":   "assignments",
+	"status_changed":     "status_changes",
+	"new_comment":        "comments",
+	"mentioned":          "comments",
+	"priority_changed":   "updates",
 	"start_date_changed": "updates",
-	"due_date_changed": "updates",
-	"task_completed":  "agent_activity",
-	"task_failed":     "agent_activity",
-	"agent_blocked":   "agent_activity",
-	"agent_completed": "agent_activity",
+	"due_date_changed":   "updates",
+	"task_completed":     "agent_activity",
+	"task_failed":        "agent_activity",
+	"agent_blocked":      "agent_activity",
+	"agent_completed":    "agent_activity",
 }
 
 // isNotifMuted returns true if the given notification type is muted for a user
@@ -381,6 +384,11 @@ func notifyDirect(
 	body string,
 	details []byte,
 ) {
+	// inbox_item.recipient_type is constrained to member/agent. Squad/other recipient
+	// kinds have no inbox -- skip to avoid a check-constraint violation (D-544).
+	if recipientType != "member" && recipientType != "agent" {
+		return
+	}
 	// Skip if recipient is the actor
 	if recipientID == e.ActorID {
 		return
@@ -652,7 +660,7 @@ func registerNotificationListeners(bus *events.Bus, queries *db.Queries) {
 				assigneeDetails)
 		}
 
-		if statusChanged {
+		if statusChanged && shouldNotifyStatusChangeSubscribers(e) {
 			prevStatus, _ := payload["prev_status"].(string)
 			statusDetails, _ := json.Marshal(map[string]string{
 				"from": prevStatus,

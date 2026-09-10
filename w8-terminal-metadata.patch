@@ -1,0 +1,729 @@
+diff --git a/server/cmd/multica/cmd_issue.go b/server/cmd/multica/cmd_issue.go
+index ebd09d313..ed1a7626b 100644
+--- a/server/cmd/multica/cmd_issue.go
++++ b/server/cmd/multica/cmd_issue.go
+@@ -320,6 +320,13 @@ var issueRunsCmd = &cobra.Command{
+ 	RunE:  runIssueRuns,
+ }
+ 
++var issueTerminalTasksCmd = &cobra.Command{
++	Use:   "terminal-tasks",
++	Short: "List body-free terminal task metadata",
++	Args:  cobra.NoArgs,
++	RunE:  runIssueTerminalTasks,
++}
++
+ var issueRunMessagesCmd = &cobra.Command{
+ 	Use:   "run-messages <task-id>",
+ 	Short: "List messages for an execution",
+@@ -417,6 +424,7 @@ func init() {
+ 	issueCmd.AddCommand(issueCommentCmd)
+ 	issueCmd.AddCommand(issueSubscriberCmd)
+ 	issueCmd.AddCommand(issueRunsCmd)
++	issueCmd.AddCommand(issueTerminalTasksCmd)
+ 	issueCmd.AddCommand(issueRunMessagesCmd)
+ 	issueCmd.AddCommand(issueUsageCmd)
+ 	issueCmd.AddCommand(issueRerunCmd)
+@@ -521,6 +529,11 @@ func init() {
+ 	// issue runs
+ 	issueRunsCmd.Flags().String("output", "table", "Output format: table or json")
+ 	issueRunsCmd.Flags().Bool("full-id", false, "Show full task UUIDs in table output")
++	issueTerminalTasksCmd.Flags().Int("limit", 100, "Maximum records to return (1-100)")
++	issueTerminalTasksCmd.Flags().String("after-completed-at", "", "Cursor completion timestamp (RFC3339Nano; requires --after-id and both watermark flags)")
++	issueTerminalTasksCmd.Flags().String("after-id", "", "Cursor task UUID (requires --after-completed-at and both watermark flags)")
++	issueTerminalTasksCmd.Flags().String("watermark-completed-at", "", "Fixed scan watermark completion timestamp (RFC3339Nano; requires --watermark-id)")
++	issueTerminalTasksCmd.Flags().String("watermark-id", "", "Fixed scan watermark task UUID (requires --watermark-completed-at)")
+ 
+ 	// issue usage
+ 	issueUsageCmd.Flags().String("output", "table", "Output format: table or json")
+@@ -2143,6 +2156,37 @@ func runIssueUsage(cmd *cobra.Command, args []string) error {
+ 	return nil
+ }
+ 
++func runIssueTerminalTasks(cmd *cobra.Command, _ []string) error {
++	client, err := newAPIClient(cmd)
++	if err != nil {
++		return err
++	}
++
++	query := url.Values{}
++	limit, _ := cmd.Flags().GetInt("limit")
++	query.Set("limit", strconv.Itoa(limit))
++	for flag, param := range map[string]string{
++		"after-completed-at":     "after_completed_at",
++		"after-id":               "after_id",
++		"watermark-completed-at": "watermark_completed_at",
++		"watermark-id":           "watermark_id",
++	} {
++		value, _ := cmd.Flags().GetString(flag)
++		if value != "" {
++			query.Set(param, value)
++		}
++	}
++
++	ctx, cancel := cli.APIContext(context.Background())
++	defer cancel()
++
++	var page map[string]any
++	if err := client.GetJSON(ctx, "/api/task-runs/terminal-metadata?"+query.Encode(), &page); err != nil {
++		return fmt.Errorf("list terminal tasks: %w", err)
++	}
++	return cli.PrintJSON(os.Stdout, page)
++}
++
+ func runIssueRunMessages(cmd *cobra.Command, args []string) error {
+ 	client, err := newAPIClient(cmd)
+ 	if err != nil {
+diff --git a/server/cmd/multica/cmd_issue_terminal_tasks_test.go b/server/cmd/multica/cmd_issue_terminal_tasks_test.go
+new file mode 100644
+index 000000000..b4b450d45
+--- /dev/null
++++ b/server/cmd/multica/cmd_issue_terminal_tasks_test.go
+@@ -0,0 +1,71 @@
++package main
++
++import (
++	"encoding/json"
++	"net/http"
++	"net/http/httptest"
++	"net/url"
++	"testing"
++
++	"github.com/spf13/cobra"
++)
++
++func TestRunIssueTerminalTasksForwardsStableCursorAndPrintsJSON(t *testing.T) {
++	wantQuery := url.Values{
++		"after_completed_at":     {"2026-07-27T12:00:00.123Z"},
++		"after_id":               {"11111111-1111-1111-1111-111111111111"},
++		"limit":                  {"25"},
++		"watermark_completed_at": {"2026-07-27T13:00:00.456Z"},
++		"watermark_id":           {"22222222-2222-2222-2222-222222222222"},
++	}
++	wantPage := map[string]any{
++		"records":     []any{},
++		"has_more":    false,
++		"next_cursor": nil,
++		"watermark": map[string]any{
++			"completed_at": "2026-07-27T13:00:00.456Z",
++			"source_id":    "22222222-2222-2222-2222-222222222222",
++		},
++	}
++
++	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
++		if r.Method != http.MethodGet {
++			t.Fatalf("method = %s, want GET", r.Method)
++		}
++		if r.URL.Path != "/api/task-runs/terminal-metadata" {
++			t.Fatalf("path = %q", r.URL.Path)
++		}
++		if got := r.URL.Query(); got.Encode() != wantQuery.Encode() {
++			t.Fatalf("query = %q, want %q", got.Encode(), wantQuery.Encode())
++		}
++		_ = json.NewEncoder(w).Encode(wantPage)
++	}))
++	t.Cleanup(srv.Close)
++	t.Setenv("MULTICA_SERVER_URL", srv.URL)
++	t.Setenv("MULTICA_WORKSPACE_ID", "workspace-1")
++	t.Setenv("MULTICA_TOKEN", "test-token")
++
++	cmd := &cobra.Command{Use: "terminal-tasks"}
++	cmd.Flags().Int("limit", 100, "")
++	cmd.Flags().String("after-completed-at", "", "")
++	cmd.Flags().String("after-id", "", "")
++	cmd.Flags().String("watermark-completed-at", "", "")
++	cmd.Flags().String("watermark-id", "", "")
++	_ = cmd.Flags().Set("limit", "25")
++	_ = cmd.Flags().Set("after-completed-at", "2026-07-27T12:00:00.123Z")
++	_ = cmd.Flags().Set("after-id", "11111111-1111-1111-1111-111111111111")
++	_ = cmd.Flags().Set("watermark-completed-at", "2026-07-27T13:00:00.456Z")
++	_ = cmd.Flags().Set("watermark-id", "22222222-2222-2222-2222-222222222222")
++
++	out, err := captureStdout(t, func() error { return runIssueTerminalTasks(cmd, nil) })
++	if err != nil {
++		t.Fatalf("runIssueTerminalTasks: %v", err)
++	}
++	var got map[string]any
++	if err := json.Unmarshal([]byte(out), &got); err != nil {
++		t.Fatalf("decode stdout: %v", err)
++	}
++	if got["has_more"] != false || got["next_cursor"] != nil {
++		t.Fatalf("unexpected page envelope: %#v", got)
++	}
++}
+diff --git a/server/cmd/server/router.go b/server/cmd/server/router.go
+index af7ef91fa..9954347d3 100644
+--- a/server/cmd/server/router.go
++++ b/server/cmd/server/router.go
+@@ -1077,6 +1077,7 @@ func NewRouterWithOptions(pool *pgxpool.Pool, hub *realtime.Hub, bus *events.Bus
+ 
+ 			// Assignee frequency
+ 			r.Get("/api/assignee-frequency", h.GetAssigneeFrequency)
++			r.Get("/api/task-runs/terminal-metadata", h.ListTerminalTaskMetadata)
+ 
+ 			// Issues
+ 			r.Route("/api/issues", func(r chi.Router) {
+diff --git a/server/internal/handler/terminal_task_metadata.go b/server/internal/handler/terminal_task_metadata.go
+new file mode 100644
+index 000000000..753e8c9a8
+--- /dev/null
++++ b/server/internal/handler/terminal_task_metadata.go
+@@ -0,0 +1,200 @@
++package handler
++
++import (
++	"errors"
++	"net/http"
++	"strconv"
++	"time"
++
++	"github.com/jackc/pgx/v5"
++	"github.com/jackc/pgx/v5/pgtype"
++	"github.com/multica-ai/multica/server/internal/util"
++	db "github.com/multica-ai/multica/server/pkg/db/generated"
++)
++
++const maxTerminalTaskMetadataPage = 100
++
++type terminalTaskMetadataCursor struct {
++	CompletedAt string `json:"completed_at"`
++	SourceID    string `json:"source_id"`
++}
++
++type terminalTaskMetadataRecord struct {
++	Attempt      int32   `json:"attempt"`
++	CompletedAt  string  `json:"completed_at"`
++	CreatedAt    string  `json:"created_at"`
++	DispatchedAt *string `json:"dispatched_at"`
++	IsLeaderTask bool    `json:"is_leader_task"`
++	IssueID      string  `json:"issue_id"`
++	Kind         string  `json:"kind"`
++	MaxAttempts  int32   `json:"max_attempts"`
++	ParentTaskID *string `json:"parent_task_id"`
++	SourceID     string  `json:"source_id"`
++	StartedAt    *string `json:"started_at"`
++	Status       string  `json:"status"`
++}
++
++type terminalTaskMetadataPage struct {
++	Records    []terminalTaskMetadataRecord `json:"records"`
++	HasMore    bool                         `json:"has_more"`
++	NextCursor *terminalTaskMetadataCursor  `json:"next_cursor"`
++	Watermark  *terminalTaskMetadataCursor  `json:"watermark"`
++}
++
++func terminalTimestamp(value pgtype.Timestamptz) string {
++	return value.Time.UTC().Format(time.RFC3339Nano)
++}
++
++func terminalTimestampPtr(value pgtype.Timestamptz) *string {
++	if !value.Valid {
++		return nil
++	}
++	formatted := terminalTimestamp(value)
++	return &formatted
++}
++
++func parseTerminalTaskMetadataCursor(
++	w http.ResponseWriter,
++	completedAtRaw, idRaw, name string,
++) (pgtype.Timestamptz, pgtype.UUID, bool) {
++	if completedAtRaw == "" && idRaw == "" {
++		return pgtype.Timestamptz{}, pgtype.UUID{}, true
++	}
++	if completedAtRaw == "" || idRaw == "" {
++		writeError(w, http.StatusBadRequest, name+" cursor requires both fields")
++		return pgtype.Timestamptz{}, pgtype.UUID{}, false
++	}
++	completedAt, err := time.Parse(time.RFC3339Nano, completedAtRaw)
++	if err != nil {
++		writeError(w, http.StatusBadRequest, "invalid "+name+"_completed_at")
++		return pgtype.Timestamptz{}, pgtype.UUID{}, false
++	}
++	id, err := util.ParseUUID(idRaw)
++	if err != nil {
++		writeError(w, http.StatusBadRequest, "invalid "+name+"_id")
++		return pgtype.Timestamptz{}, pgtype.UUID{}, false
++	}
++	return pgtype.Timestamptz{Time: completedAt, Valid: true}, id, true
++}
++
++func taskMetadataCursor(
++	completedAt pgtype.Timestamptz,
++	sourceID pgtype.UUID,
++) *terminalTaskMetadataCursor {
++	return &terminalTaskMetadataCursor{
++		CompletedAt: terminalTimestamp(completedAt),
++		SourceID:    uuidToString(sourceID),
++	}
++}
++
++// ListTerminalTaskMetadata returns a text-free, stable workspace task export.
++func (h *Handler) ListTerminalTaskMetadata(w http.ResponseWriter, r *http.Request) {
++	limit := maxTerminalTaskMetadataPage
++	if raw := r.URL.Query().Get("limit"); raw != "" {
++		parsed, err := strconv.Atoi(raw)
++		if err != nil || parsed < 1 || parsed > maxTerminalTaskMetadataPage {
++			writeError(w, http.StatusBadRequest, "limit must be between 1 and 100")
++			return
++		}
++		limit = parsed
++	}
++
++	afterCompletedAt, afterID, ok := parseTerminalTaskMetadataCursor(
++		w,
++		r.URL.Query().Get("after_completed_at"),
++		r.URL.Query().Get("after_id"),
++		"after",
++	)
++	if !ok {
++		return
++	}
++	watermarkCompletedAt, watermarkID, ok := parseTerminalTaskMetadataCursor(
++		w,
++		r.URL.Query().Get("watermark_completed_at"),
++		r.URL.Query().Get("watermark_id"),
++		"watermark",
++	)
++	if !ok {
++		return
++	}
++	if afterCompletedAt.Valid && !watermarkCompletedAt.Valid {
++		writeError(w, http.StatusBadRequest, "after cursor requires a watermark")
++		return
++	}
++
++	workspaceID, err := util.ParseUUID(h.resolveWorkspaceID(r))
++	if err != nil {
++		writeError(w, http.StatusBadRequest, "invalid workspace")
++		return
++	}
++	if !watermarkCompletedAt.Valid {
++		watermark, watermarkErr := h.Queries.GetTerminalTaskMetadataWatermark(
++			r.Context(),
++			workspaceID,
++		)
++		if errors.Is(watermarkErr, pgx.ErrNoRows) {
++			writeJSON(w, http.StatusOK, terminalTaskMetadataPage{
++				Records: []terminalTaskMetadataRecord{},
++			})
++			return
++		}
++		if watermarkErr != nil {
++			writeError(w, http.StatusInternalServerError, "failed to read task watermark")
++			return
++		}
++		watermarkCompletedAt, watermarkID = watermark.CompletedAt, watermark.ID
++	}
++	if !afterCompletedAt.Valid {
++		afterCompletedAt = pgtype.Timestamptz{Time: time.Unix(0, 0).UTC(), Valid: true}
++		afterID, _ = util.ParseUUID("00000000-0000-0000-0000-000000000000")
++	}
++
++	rows, err := h.Queries.ListTerminalTaskMetadata(
++		r.Context(),
++		db.ListTerminalTaskMetadataParams{
++			WorkspaceID:          workspaceID,
++			AfterCompletedAt:     afterCompletedAt,
++			AfterID:              afterID,
++			WatermarkCompletedAt: watermarkCompletedAt,
++			WatermarkID:          watermarkID,
++			RowLimit:             int32(limit + 1),
++		},
++	)
++	if err != nil {
++		writeError(w, http.StatusInternalServerError, "failed to list terminal tasks")
++		return
++	}
++
++	hasMore := len(rows) > limit
++	if hasMore {
++		rows = rows[:limit]
++	}
++	records := make([]terminalTaskMetadataRecord, len(rows))
++	for index, row := range rows {
++		records[index] = terminalTaskMetadataRecord{
++			Attempt:      row.Attempt,
++			CompletedAt:  terminalTimestamp(row.CompletedAt),
++			CreatedAt:    terminalTimestamp(row.CreatedAt),
++			DispatchedAt: terminalTimestampPtr(row.DispatchedAt),
++			IsLeaderTask: row.IsLeaderTask,
++			IssueID:      uuidToString(row.IssueID),
++			Kind:         row.Kind,
++			MaxAttempts:  row.MaxAttempts,
++			ParentTaskID: uuidToPtr(row.ParentTaskID),
++			SourceID:     uuidToString(row.SourceID),
++			StartedAt:    terminalTimestampPtr(row.StartedAt),
++			Status:       row.Status,
++		}
++	}
++	var nextCursor *terminalTaskMetadataCursor
++	if hasMore {
++		last := rows[len(rows)-1]
++		nextCursor = taskMetadataCursor(last.CompletedAt, last.SourceID)
++	}
++	writeJSON(w, http.StatusOK, terminalTaskMetadataPage{
++		Records:    records,
++		HasMore:    hasMore,
++		NextCursor: nextCursor,
++		Watermark:  taskMetadataCursor(watermarkCompletedAt, watermarkID),
++	})
++}
+diff --git a/server/internal/handler/terminal_task_metadata_test.go b/server/internal/handler/terminal_task_metadata_test.go
+new file mode 100644
+index 000000000..822f21456
+--- /dev/null
++++ b/server/internal/handler/terminal_task_metadata_test.go
+@@ -0,0 +1,167 @@
++package handler
++
++import (
++	"context"
++	"encoding/json"
++	"fmt"
++	"net/http"
++	"net/http/httptest"
++	"net/url"
++	"sort"
++	"testing"
++	"time"
++)
++
++func createTerminalMetadataFixture(t *testing.T) (string, []string, []time.Time) {
++	t.Helper()
++	ctx := context.Background()
++	var agentID, runtimeID, issueID string
++	if err := testPool.QueryRow(ctx,
++		`SELECT id, runtime_id FROM agent WHERE workspace_id = $1 AND runtime_id IS NOT NULL LIMIT 1`,
++		testWorkspaceID,
++	).Scan(&agentID, &runtimeID); err != nil {
++		t.Fatalf("get test agent: %v", err)
++	}
++	if err := testPool.QueryRow(ctx, `
++		INSERT INTO issue (
++			workspace_id, title, status, priority, creator_id,
++			creator_type, number, position
++		)
++		VALUES ($1, 'terminal metadata', 'done', 'none', $2, 'member', 987654, 0)
++		RETURNING id
++	`, testWorkspaceID, testUserID).Scan(&issueID); err != nil {
++		t.Fatalf("create issue: %v", err)
++	}
++	t.Cleanup(func() {
++		_, _ = testPool.Exec(context.Background(), `DELETE FROM issue WHERE id = $1`, issueID)
++	})
++
++	base := time.Now().UTC().Add(-time.Hour).Truncate(time.Microsecond)
++	ids := make([]string, 0, 2)
++	completed := make([]time.Time, 0, 2)
++	for index, status := range []string{"completed", "failed"} {
++		var taskID string
++		at := base.Add(time.Duration(index) * time.Minute)
++		if err := testPool.QueryRow(ctx, `
++			INSERT INTO agent_task_queue (
++				agent_id, issue_id, status, created_at, dispatched_at,
++				started_at, completed_at, attempt, max_attempts, is_leader_task,
++				runtime_id
++			)
++			VALUES ($1, $2, $3, $4, $4, $4, $4, 1, 3, false, $5)
++			RETURNING id
++		`, agentID, issueID, status, at, runtimeID).Scan(&taskID); err != nil {
++			t.Fatalf("create terminal task: %v", err)
++		}
++		ids = append(ids, taskID)
++		completed = append(completed, at)
++	}
++	return agentID, ids, completed
++}
++
++func getTerminalMetadata(t *testing.T, query url.Values) map[string]any {
++	t.Helper()
++	w := httptest.NewRecorder()
++	req := newRequest(
++		http.MethodGet,
++		"/api/task-runs/terminal-metadata?"+query.Encode(),
++		nil,
++	)
++	testHandler.ListTerminalTaskMetadata(w, req)
++	if w.Code != http.StatusOK {
++		t.Fatalf("ListTerminalTaskMetadata status=%d body=%s", w.Code, w.Body)
++	}
++	var result map[string]any
++	if err := json.Unmarshal(w.Body.Bytes(), &result); err != nil {
++		t.Fatalf("decode response: %v", err)
++	}
++	return result
++}
++
++func TestListTerminalTaskMetadataIsBodyFreeAndWatermarked(t *testing.T) {
++	if testHandler == nil {
++		t.Skip("database not available")
++	}
++	agentID, taskIDs, completed := createTerminalMetadataFixture(t)
++	first := getTerminalMetadata(t, url.Values{
++		"limit":                  {"1"},
++		"after_completed_at":     {completed[0].Add(-time.Second).Format(time.RFC3339Nano)},
++		"after_id":               {"00000000-0000-0000-0000-000000000000"},
++		"watermark_completed_at": {completed[1].Format(time.RFC3339Nano)},
++		"watermark_id":           {taskIDs[1]},
++	})
++
++	if got := fmt.Sprint(first["has_more"]); got != "true" {
++		t.Fatalf("has_more=%s, want true", got)
++	}
++	records := first["records"].([]any)
++	if len(records) != 1 {
++		t.Fatalf("first page records=%d, want 1", len(records))
++	}
++	record := records[0].(map[string]any)
++	keys := make([]string, 0, len(record))
++	for key := range record {
++		keys = append(keys, key)
++	}
++	sort.Strings(keys)
++	wantKeys := []string{
++		"attempt", "completed_at", "created_at", "dispatched_at",
++		"is_leader_task", "issue_id", "kind", "max_attempts",
++		"parent_task_id", "source_id", "started_at", "status",
++	}
++	if fmt.Sprint(keys) != fmt.Sprint(wantKeys) {
++		t.Fatalf("record keys=%v, want %v", keys, wantKeys)
++	}
++
++	next := first["next_cursor"].(map[string]any)
++	watermark := first["watermark"].(map[string]any)
++	var lateID string
++	if err := testPool.QueryRow(context.Background(), `
++		INSERT INTO agent_task_queue (
++			agent_id, issue_id, status, created_at, completed_at, runtime_id
++		)
++		SELECT $1, issue_id, 'completed', now(), now() + interval '1 minute', runtime_id
++		FROM agent_task_queue WHERE id = $2
++		RETURNING id
++	`, agentID, taskIDs[0]).Scan(&lateID); err != nil {
++		t.Fatalf("create post-watermark task: %v", err)
++	}
++
++	second := getTerminalMetadata(t, url.Values{
++		"limit":                  {"10"},
++		"after_completed_at":     {fmt.Sprint(next["completed_at"])},
++		"after_id":               {fmt.Sprint(next["source_id"])},
++		"watermark_completed_at": {fmt.Sprint(watermark["completed_at"])},
++		"watermark_id":           {fmt.Sprint(watermark["source_id"])},
++	})
++	secondRecords := second["records"].([]any)
++	if len(secondRecords) != 1 {
++		t.Fatalf("second page records=%d, want 1", len(secondRecords))
++	}
++	gotID := secondRecords[0].(map[string]any)["source_id"]
++	if gotID == lateID || gotID == record["source_id"] {
++		t.Fatalf(
++			"unstable or duplicate second-page source_id=%v late=%s first=%v expected=%s",
++			gotID,
++			lateID,
++			record["source_id"],
++			taskIDs[1],
++		)
++	}
++}
++
++func TestListTerminalTaskMetadataRejectsPartialCursor(t *testing.T) {
++	if testHandler == nil {
++		t.Skip("database not available")
++	}
++	w := httptest.NewRecorder()
++	req := newRequest(
++		http.MethodGet,
++		"/api/task-runs/terminal-metadata?after_id=00000000-0000-4000-8000-000000000001",
++		nil,
++	)
++	testHandler.ListTerminalTaskMetadata(w, req)
++	if w.Code != http.StatusBadRequest {
++		t.Fatalf("partial cursor status=%d, want 400", w.Code)
++	}
++}
+diff --git a/server/pkg/db/generated/agent.sql.go b/server/pkg/db/generated/agent.sql.go
+index 561455db9..0f6c91cd5 100644
+--- a/server/pkg/db/generated/agent.sql.go
++++ b/server/pkg/db/generated/agent.sql.go
+@@ -2983,6 +2983,29 @@ func (q *Queries) GetLatestTaskRolloutMissing(ctx context.Context, arg GetLatest
+ 	return session_rollout_missing, err
+ }
+ 
++const getTerminalTaskMetadataWatermark = `-- name: GetTerminalTaskMetadataWatermark :one
++SELECT q.completed_at, q.id
++FROM agent_task_queue AS q
++JOIN issue AS i ON i.id = q.issue_id
++WHERE i.workspace_id = $1
++  AND q.status IN ('completed', 'failed', 'cancelled')
++  AND q.completed_at IS NOT NULL
++ORDER BY q.completed_at DESC, q.id DESC
++LIMIT 1
++`
++
++type GetTerminalTaskMetadataWatermarkRow struct {
++	CompletedAt pgtype.Timestamptz `json:"completed_at"`
++	ID          pgtype.UUID        `json:"id"`
++}
++
++func (q *Queries) GetTerminalTaskMetadataWatermark(ctx context.Context, workspaceID pgtype.UUID) (GetTerminalTaskMetadataWatermarkRow, error) {
++	row := q.db.QueryRow(ctx, getTerminalTaskMetadataWatermark, workspaceID)
++	var i GetTerminalTaskMetadataWatermarkRow
++	err := row.Scan(&i.CompletedAt, &i.ID)
++	return i, err
++}
++
+ const getWorkspaceAgentActivity30d = `-- name: GetWorkspaceAgentActivity30d :many
+ SELECT
+     atq.agent_id,
+@@ -4022,6 +4045,100 @@ func (q *Queries) ListTasksByIssue(ctx context.Context, issueID pgtype.UUID) ([]
+ 	return items, nil
+ }
+ 
++const listTerminalTaskMetadata = `-- name: ListTerminalTaskMetadata :many
++SELECT
++  q.attempt,
++  q.completed_at,
++  q.created_at,
++  q.dispatched_at,
++  q.is_leader_task,
++  q.issue_id,
++  CASE
++    WHEN q.chat_session_id IS NOT NULL THEN 'chat'
++    WHEN q.autopilot_run_id IS NOT NULL THEN 'autopilot'
++    WHEN q.trigger_comment_id IS NOT NULL THEN 'comment'
++    ELSE 'direct'
++  END::text AS kind,
++  q.max_attempts,
++  q.parent_task_id,
++  q.id AS source_id,
++  q.started_at,
++  q.status
++FROM agent_task_queue AS q
++JOIN issue AS i ON i.id = q.issue_id
++WHERE i.workspace_id = $1
++  AND q.status IN ('completed', 'failed', 'cancelled')
++  AND q.completed_at IS NOT NULL
++  AND (q.completed_at, q.id) > ($2::timestamptz, $3::uuid)
++  AND (q.completed_at, q.id) <= ($4::timestamptz, $5::uuid)
++ORDER BY q.completed_at ASC, q.id ASC
++LIMIT $6
++`
++
++type ListTerminalTaskMetadataParams struct {
++	WorkspaceID          pgtype.UUID        `json:"workspace_id"`
++	AfterCompletedAt     pgtype.Timestamptz `json:"after_completed_at"`
++	AfterID              pgtype.UUID        `json:"after_id"`
++	WatermarkCompletedAt pgtype.Timestamptz `json:"watermark_completed_at"`
++	WatermarkID          pgtype.UUID        `json:"watermark_id"`
++	RowLimit             int32              `json:"row_limit"`
++}
++
++type ListTerminalTaskMetadataRow struct {
++	Attempt      int32              `json:"attempt"`
++	CompletedAt  pgtype.Timestamptz `json:"completed_at"`
++	CreatedAt    pgtype.Timestamptz `json:"created_at"`
++	DispatchedAt pgtype.Timestamptz `json:"dispatched_at"`
++	IsLeaderTask bool               `json:"is_leader_task"`
++	IssueID      pgtype.UUID        `json:"issue_id"`
++	Kind         string             `json:"kind"`
++	MaxAttempts  int32              `json:"max_attempts"`
++	ParentTaskID pgtype.UUID        `json:"parent_task_id"`
++	SourceID     pgtype.UUID        `json:"source_id"`
++	StartedAt    pgtype.Timestamptz `json:"started_at"`
++	Status       string             `json:"status"`
++}
++
++func (q *Queries) ListTerminalTaskMetadata(ctx context.Context, arg ListTerminalTaskMetadataParams) ([]ListTerminalTaskMetadataRow, error) {
++	rows, err := q.db.Query(ctx, listTerminalTaskMetadata,
++		arg.WorkspaceID,
++		arg.AfterCompletedAt,
++		arg.AfterID,
++		arg.WatermarkCompletedAt,
++		arg.WatermarkID,
++		arg.RowLimit,
++	)
++	if err != nil {
++		return nil, err
++	}
++	defer rows.Close()
++	items := []ListTerminalTaskMetadataRow{}
++	for rows.Next() {
++		var i ListTerminalTaskMetadataRow
++		if err := rows.Scan(
++			&i.Attempt,
++			&i.CompletedAt,
++			&i.CreatedAt,
++			&i.DispatchedAt,
++			&i.IsLeaderTask,
++			&i.IssueID,
++			&i.Kind,
++			&i.MaxAttempts,
++			&i.ParentTaskID,
++			&i.SourceID,
++			&i.StartedAt,
++			&i.Status,
++		); err != nil {
++			return nil, err
++		}
++		items = append(items, i)
++	}
++	if err := rows.Err(); err != nil {
++		return nil, err
++	}
++	return items, nil
++}
++
+ const listWorkspaceAgentTaskSnapshot = `-- name: ListWorkspaceAgentTaskSnapshot :many
+ SELECT atq.id, atq.agent_id, atq.issue_id, atq.status, atq.priority, atq.dispatched_at, atq.started_at, atq.completed_at, atq.result, atq.error, atq.created_at, atq.context, atq.runtime_id, atq.session_id, atq.work_dir, atq.trigger_comment_id, atq.chat_session_id, atq.autopilot_run_id, atq.attempt, atq.max_attempts, atq.parent_task_id, atq.failure_reason, atq.trigger_summary, atq.force_fresh_session, atq.is_leader_task, atq.wait_reason, atq.initiator_user_id, atq.handoff_note, atq.prepare_lease_expires_at, atq.squad_id, atq.runtime_mcp_overlay, atq.escalation_for_task_id, atq.fire_at, atq.originator_user_id, atq.runtime_connected_apps, atq.coalesced_comment_ids, atq.delivered_comment_ids, atq.chat_input_task_id, atq.chat_finalize_deferred_at, atq.originator_source, atq.delegated_from_task_id, atq.retry_of_task_id, atq.rerun_of_task_id, atq.rule_version_id, atq.trigger_evidence_kind, atq.trigger_evidence_ref_id, atq.accountable_user_id, atq.session_rollout_missing FROM agent_task_queue atq
+ JOIN agent a ON a.id = atq.agent_id
+diff --git a/server/pkg/db/queries/agent.sql b/server/pkg/db/queries/agent.sql
+index 48f70e700..7fa651d93 100644
+--- a/server/pkg/db/queries/agent.sql
++++ b/server/pkg/db/queries/agent.sql
+@@ -1479,6 +1479,45 @@ SELECT * FROM agent_task_queue
+ WHERE issue_id = $1
+ ORDER BY created_at DESC;
+ 
++-- name: GetTerminalTaskMetadataWatermark :one
++SELECT q.completed_at, q.id
++FROM agent_task_queue AS q
++JOIN issue AS i ON i.id = q.issue_id
++WHERE i.workspace_id = @workspace_id
++  AND q.status IN ('completed', 'failed', 'cancelled')
++  AND q.completed_at IS NOT NULL
++ORDER BY q.completed_at DESC, q.id DESC
++LIMIT 1;
++
++-- name: ListTerminalTaskMetadata :many
++SELECT
++  q.attempt,
++  q.completed_at,
++  q.created_at,
++  q.dispatched_at,
++  q.is_leader_task,
++  q.issue_id,
++  CASE
++    WHEN q.chat_session_id IS NOT NULL THEN 'chat'
++    WHEN q.autopilot_run_id IS NOT NULL THEN 'autopilot'
++    WHEN q.trigger_comment_id IS NOT NULL THEN 'comment'
++    ELSE 'direct'
++  END::text AS kind,
++  q.max_attempts,
++  q.parent_task_id,
++  q.id AS source_id,
++  q.started_at,
++  q.status
++FROM agent_task_queue AS q
++JOIN issue AS i ON i.id = q.issue_id
++WHERE i.workspace_id = @workspace_id
++  AND q.status IN ('completed', 'failed', 'cancelled')
++  AND q.completed_at IS NOT NULL
++  AND (q.completed_at, q.id) > (@after_completed_at::timestamptz, @after_id::uuid)
++  AND (q.completed_at, q.id) <= (@watermark_completed_at::timestamptz, @watermark_id::uuid)
++ORDER BY q.completed_at ASC, q.id ASC
++LIMIT @row_limit;
++
+ -- name: UpdateAgentStatus :one
+ UPDATE agent SET status = $2, updated_at = now()
+ WHERE id = $1

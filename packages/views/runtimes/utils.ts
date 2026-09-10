@@ -205,6 +205,11 @@ const MODEL_PRICING: Record<
   "gpt-5.4-mini":       { input: 0.75, output: 4.50, cacheRead: 0.075, cacheWrite: 0.75 },
   "gpt-5.4":            { input: 2.50, output: 15,   cacheRead: 0.25,  cacheWrite: 2.50 },
   "gpt-5.3-codex":      { input: 1.75, output: 14,   cacheRead: 0.175, cacheWrite: 1.75 },
+  // `gpt-5.3-codex-spark` is a Codex Pro research-preview entitlement
+  // with separate usage limits and no public per-token API price. Keep it
+  // maintained at zero cost so usage tokens remain visible instead of being
+  // dropped from totals as an unmapped SKU.
+  "gpt-5.3-codex-spark": { input: 0,    output: 0,    cacheRead: 0,     cacheWrite: 0 },
 
   // -- OpenAI: GPT-5 family (Codex CLI's default is gpt-5-codex; -codex/-mini/-nano variants priced per OpenAI tiers) --
   "gpt-5-codex":        { input: 1.25, output: 10,   cacheRead: 0.125, cacheWrite: 1.25 },

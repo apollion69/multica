@@ -186,6 +186,7 @@ func TestProviderNetworkRetrySchedule(t *testing.T) {
 		{provNet, 1, 1},                          // disabled → stays disabled, not revived
 		{provNet, 5, 5},                          // higher configured budget → kept (widen-only)
 		{"timeout", 2, 2},                        // unrelated reason → column value untouched
+		{"codex_semantic_inactivity", 2, 2},      // cooldown does not widen the retry budget
 		{"timeout", 1, 1},                        // unrelated + disabled → untouched
 	}
 	for _, tc := range ceilingCases {
@@ -203,6 +204,7 @@ func TestProviderNetworkRetrySchedule(t *testing.T) {
 	}{
 		{provNet, 1, 0}, // first failure → immediate retry
 		{provNet, 2, providerNetworkFinalRetryWait}, // second failure → 5s-deferred retry
+		{"codex_semantic_inactivity", 1, codexSemanticInactivityRetryWait},
 		{"timeout", 2, 0}, // unrelated reason → never deferred
 	}
 	for _, tc := range delayCases {

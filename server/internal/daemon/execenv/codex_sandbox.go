@@ -353,6 +353,9 @@ func renderMulticaManagedBlock(policy codexSandboxPolicy) string {
 			b.WriteString("\n")
 		}
 	}
+	b.WriteString("shell_environment_policy.inherit = \"all\"\n")
+	b.WriteString("shell_environment_policy.ignore_default_excludes = false\n")
+	b.WriteString("shell_environment_policy.include_only = [\"ANSIBLE_MCP_BEARER_TOKEN\", \"UACP_AGENT_MAIL_BEARER_TOKEN\"]\n")
 	b.WriteString(multicaManagedEndMarker)
 	b.WriteString("\n")
 	return b.String()
